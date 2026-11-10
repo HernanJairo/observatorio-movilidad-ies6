@@ -1,0 +1,131 @@
+{
+  "fecha_entrenamiento": "2026-11-04T01:01:18",
+  "n_muestras": 1000,
+  "split": "80/20 estratificado (random_state=42)",
+  "optimizacion": "GridSearchCV · StratifiedKFold 5 folds · refit F1",
+  "target": "target_es_grave",
+  "positivos_pct": 25.5,
+  "categorias": {
+    "calle_1": [
+      "AVENIDA BELGRANO",
+      "AVENIDA ÉXODO",
+      "LEANDRO N. ALEM",
+      "AVENIDA SAN MARTÍN",
+      "AVENIDA JOSÉ HERNÁNDEZ",
+      "RUTA PROVINCIAL 47",
+      "AVENIDA CONGRESO",
+      "ACCESO NORTE A PERICO",
+      "AVENIDA VILLAFAÑE",
+      "AVENIDA BOLIVIA",
+      "AVENIDA JUJUY",
+      "CALLE 25 DE MAYO",
+      "AVENIDA LA BANDERA",
+      "ROTONDA AVENIDA BELGRANO",
+      "CALLE NO ESPECIFICADA",
+      "ACCESO A PERICO (RP 47)",
+      "AVENIDA COMANDANTE ESPORA",
+      "AVENIDA ITALIA",
+      "RUTA NACIONAL 66"
+    ]
+  },
+  "modelos": {
+    "arbol": {
+      "accuracy": 0.56,
+      "precision": 0.363,
+      "recall": 0.9608,
+      "f1": 0.5269,
+      "matriz_confusion": [
+        [
+          63,
+          86
+        ],
+        [
+          2,
+          49
+        ]
+      ],
+      "f1_cv": 0.5127,
+      "mejores_params": {
+        "class_weight": "balanced",
+        "criterion": "entropy",
+        "max_depth": 4,
+        "min_samples_split": 2
+      }
+    },
+    "random_forest": {
+      "accuracy": 0.685,
+      "precision": 0.4211,
+      "recall": 0.6275,
+      "f1": 0.5039,
+      "matriz_confusion": [
+        [
+          105,
+          44
+        ],
+        [
+          19,
+          32
+        ]
+      ],
+      "f1_cv": 0.5112,
+      "mejores_params": {
+        "class_weight": "balanced",
+        "max_depth": 6,
+        "min_samples_split": 2,
+        "n_estimators": 150
+      }
+    },
+    "gradient_boosting": {
+      "accuracy": 0.71,
+      "precision": 0.3871,
+      "recall": 0.2353,
+      "f1": 0.2927,
+      "matriz_confusion": [
+        [
+          130,
+          19
+        ],
+        [
+          39,
+          12
+        ]
+      ],
+      "f1_cv": 0.3923,
+      "mejores_params": {
+        "learning_rate": 0.05,
+        "max_depth": 5,
+        "n_estimators": 200
+      }
+    }
+  },
+  "mejor_modelo": "arbol",
+  "modelo_inferencia": "random_forest",
+  "feature_importance": [
+    {
+      "feature": "total_victimas",
+      "label": "Total de víctimas",
+      "importance": 0.8594
+    },
+    {
+      "feature": "tipo_de_via_URBANA",
+      "label": "Tipo de vía: URBANA",
+      "importance": 0.1048
+    },
+    {
+      "feature": "contraparte_siniestro_COLECTIVO",
+      "label": "Contraparte: COLECTIVO",
+      "importance": 0.0242
+    },
+    {
+      "feature": "calle_1_ACCESO NORTE A PERICO",
+      "label": "Arteria: ACCESO NORTE A PERICO",
+      "importance": 0.0116
+    },
+    {
+      "feature": "periodo_dia_nombre_Tarde (12-19h)",
+      "label": "Franja horaria: Tarde (12-19h)",
+      "importance": 0.0
+    }
+  ],
+  "importancia_de": "arbol"
+}

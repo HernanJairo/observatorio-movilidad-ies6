@@ -20,10 +20,16 @@ import html
 import json
 import math
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import random
 import re
 import sys
 import threading
+import traceback
 import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -42,6 +48,10 @@ sys.path.insert(0, str(RAIZ / "src"))
 from geocoder import (  # noqa: E402
     buscar as geo_buscar,
     buscar_nominatim as geo_nominatim,
+    cruzar_calles as geo_cruzar,
+    sugerir_palpala as geo_palpala,
+    sugerir_sanpedro as geo_sanpedro,
+    limpiar_calle,
     normalizar,
 )
 
@@ -55,6 +65,8 @@ CENTROS_MUNICIPIOS = {
     "PERICO": (-24.377, -65.117),
     "MONTERRICO": (-24.438, -65.161),
     "EL CARMEN": (-24.388, -65.259),
+    "PALPALA": (-24.256, -65.212),
+    "SAN PEDRO DE JUJUY": (-24.233, -64.866),
     "SAN SALVADOR DE JUJUY": (-24.185, -65.299),
 }
 
@@ -128,6 +140,28 @@ def _cargar_red():
 COLUMNAS, SINIESTROS = _cargar_siniestros()
 RED_VIAL = _cargar_red()
 
+# Trazabilidad de prensa: cada siniestro incorporado desde el monitor
+# conserva el enlace a la fuente original, el medio y el resumen.
+COLUMNAS_TRAZA = ("url_noticia", "medio_prensa", "resumen_contexto")
+
+
+def _asegurar_columnas_traza():
+    """Agrega al CSV las columnas de trazabilidad si faltan."""
+    faltan = [c for c in COLUMNAS_TRAZA if c not in COLUMNAS]
+    if not faltan:
+        return
+    COLUMNAS.extend(faltan)
+    with open(RUTA_CSV, encoding="utf-8-sig", newline="") as f:
+        filas = list(csv.DictReader(f))
+    with open(RUTA_CSV, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=COLUMNAS)
+        w.writeheader()
+        for fila in filas:
+            w.writerow({c: (fila.get(c) or "") for c in COLUMNAS})
+
+
+_asegurar_columnas_traza()
+
 
 def _parsear_franja(valor):
     """Devuelve (desde, hasta) en horas o None si no aplica."""
@@ -157,10 +191,79 @@ def index():
     return send_file(RUTA_INDEX)
 
 
+# Centro del corredor interurbano (Perico <-> San Salvador por RN 66/RP 42):
+# vista de camara para "Toda la Region" y "Solo Rutas y Accesos".
+CENTRO_REGION = (-24.29, -65.19)
+JURS_AMPLIAS = ("TODOS", "RUTAS")
+
+
+def _es_siniestro_ruta(s):
+    """True si el siniestro ocurrio sobre un corredor vial provincial o
+    nacional (rutas, accesos, empalmes) y no en el casco urbano."""
+    return (
+        normalizar(s.get("tipo_de_via")).startswith("RUTA")
+        or bool(re.search(
+            r"\b(RUTA|RN|RP|ACCESO|EMPALME|NACIONAL|PROVINCIAL)\b",
+            normalizar(s.get("calle_1") or "")))
+    )
+
+
+def _subset_jurisdiccion(jur):
+    """Siniestros del ambito elegido: TODOS | RUTAS | una ciudad."""
+    if jur == "RUTAS":
+        return [s for s in SINIESTROS if _es_siniestro_ruta(s)]
+    if jur in CENTROS_MUNICIPIOS:
+        return [s for s in SINIESTROS if s["_jur"] == jur]
+    return list(SINIESTROS)  # TODOS / sin filtro
+
+
 def _jurisdiccion_param():
-    """Jurisdiccion estricta: las 4 ciudades del corredor; defecto Perico."""
+    """Jurisdiccion del selector: TODOS | RUTAS | una ciudad del corredor."""
     jur = normalizar(request.args.get("jurisdiccion", ""))
+    if jur in ("", "TODOS", "TODAS", "TODA LA REGION", "REGION", "TODO JUJUY"):
+        return "TODOS"
+    if jur == "RUTAS" or "SOLO RUTAS" in jur:
+        return "RUTAS"
     return jur if jur in CENTROS_MUNICIPIOS else "PERICO"
+
+
+def _centro_busqueda(jur):
+    """(lat, lon, radio_km) para acotar busquedas al ambito activo."""
+    centro = CENTROS_MUNICIPIOS.get(jur)
+    if centro is None:
+        return CENTRO_REGION[0], CENTRO_REGION[1], 45.0
+    return centro[0], centro[1], RADIO_JURISDICCION_KM
+
+
+# Bounding boxes estrictos (min_lon, min_lat, max_lon, max_lat): el
+# geocoder y Nominatim solo pueden resolver dentro del poligono de la
+# jurisdiccion elegida — una calle de Perico jamas resuelve en otra zona.
+BBOX_JURISDICCION = {
+    "PERICO": (-65.19, -24.43, -65.04, -24.32),
+    "MONTERRICO": (-65.23, -24.50, -65.10, -24.38),
+    "EL CARMEN": (-65.34, -24.45, -65.18, -24.33),
+    "PALPALA": (-65.24, -24.29, -65.18, -24.23),
+    "SAN PEDRO DE JUJUY": (-64.90, -24.26, -64.83, -24.21),
+    "SAN SALVADOR DE JUJUY": (-65.42, -24.28, -65.18, -24.10),
+    "TODOS": (-65.45, -24.52, -64.80, -24.08),
+    "RUTAS": (-65.45, -24.52, -64.80, -24.08),
+}
+
+_TIPOS_VIA_NOMINATIM = {
+    "road", "residential", "tertiary", "secondary", "primary", "trunk",
+    "unclassified", "living_street", "service", "pedestrian", "cycleway",
+    "footway", "track", "path", "steps",
+}
+
+
+def _jurisdiccion_query(valor):
+    """Normaliza el parametro jurisdiccion de los buscadores (tambien
+    acepta nombres de ciudad: 'Perico' -> 'PERICO')."""
+    jur = normalizar(valor or "")
+    if jur in BBOX_JURISDICCION:
+        return jur
+    ciudad = _norm_ciudad(jur)
+    return normalizar(ciudad) if ciudad else "TODOS"
 
 
 @app.get("/api/datos")
@@ -172,9 +275,8 @@ def api_datos():
 
     filtrados = [
         s
-        for s in SINIESTROS
-        if s["_jur"] == jurisdiccion
-        and (modo in ("", "TODOS", "TODAS") or s["_modo"] == modo)
+        for s in _subset_jurisdiccion(jurisdiccion)
+        if (modo in ("", "TODOS", "TODAS") or s["_modo"] == modo)
         and (dia in ("", "TODOS", "TODAS") or s["_dia"] == dia
              or s["dia_semana_num"] == dia)
         and _en_franja(s["_hora"], franja)
@@ -457,16 +559,64 @@ def api_buscar_calle():
     if len(consulta) < 2:
         return jsonify({"sugerencias": []})
 
-    centro = CENTROS_MUNICIPIOS[_jurisdiccion_param()]
+    jur = _jurisdiccion_query(request.args.get("jurisdiccion", ""))
+    lat_c, lon_c, radio = _centro_busqueda(jur)
+    bbox = BBOX_JURISDICCION.get(jur, BBOX_JURISDICCION["TODOS"])
+
+    # 1) Red vial local con fuzzy matching (raiz de via + difflib) y
+    #    verificacion estricta: el punto medio debe caer dentro del bbox.
     sugerencias = []
-    for r in geo_buscar(consulta):
-        if _haversine_km(r["lat"], r["lon"], *centro) > RADIO_JURISDICCION_KM:
+    vistos = set()
+    fuentes_locales = geo_buscar(consulta)
+    if jur == "PALPALA":
+        # Palpala esta fuera de la red vial GeoJSON: catalogo propio de
+        # arterias troncales (RN 66, Martijena, Rio de la Plata, etc.).
+        fuentes_locales = list(fuentes_locales) + list(
+            geo_palpala(consulta))
+    elif jur == "SAN PEDRO DE JUJUY":
+        fuentes_locales = list(fuentes_locales) + list(
+            geo_sanpedro(consulta))
+    for r in fuentes_locales:
+        if not (bbox[1] <= r["lat"] <= bbox[3]
+                and bbox[0] <= r["lon"] <= bbox[2]):
+            continue  # fuera de la jurisdiccion elegida: no resolver
+        clave = normalizar(r["nombre"])
+        if clave in vistos:
             continue
+        vistos.add(clave)
         sugerencias.append(
-            {"nombre": r["nombre"], "lon": r["lon"], "lat": r["lat"]}
+            {"nombre": r["nombre"], "lon": r["lon"], "lat": r["lat"],
+             "fuente": "local"}
         )
         if len(sugerencias) >= 8:
             break
+
+    # 2) Nominatim acotado al MISMO bbox: cubre San Salvador (fuera de la
+    #    red local) y arterias que la red no tiene mapeadas.
+    if len(sugerencias) < 8:
+        ciudad = {"PERICO": "Perico", "MONTERRICO": "Monterrico",
+                  "EL CARMEN": "El Carmen",
+                  "SAN SALVADOR DE JUJUY": "San Salvador"}.get(jur, "Jujuy")
+        try:
+            for r in geo_nominatim(
+                    f"{consulta}, {ciudad}, Jujuy, Argentina",
+                    limite=5, viewbox=bbox):
+                if r.get("tipo") not in _TIPOS_VIA_NOMINATIM:
+                    continue
+                nombre = ", ".join(
+                    str(r["nombre"]).split(",")[:2]).strip()
+                clave = normalizar(nombre)
+                if not nombre or clave in vistos:
+                    continue
+                vistos.add(clave)
+                sugerencias.append(
+                    {"nombre": nombre, "lon": r["lon"], "lat": r["lat"],
+                     "fuente": "nominatim"}
+                )
+                if len(sugerencias) >= 8:
+                    break
+        except requests.RequestException:
+            pass
     return jsonify({"sugerencias": sugerencias})
 
 
@@ -494,6 +644,375 @@ def _periodo_dia(hora):
     if hora < 19:
         return "Tarde (12-19h)", 2
     return "Noche (19-24h)", 3
+
+
+# Palabras de menu/banner del diario que no deben llegar a Gemini.
+_BASURA_NOTA = ("facebook", "twitter", "instagram", "youtube",
+              "copyright", "todos los derechos", "newsletter",
+              "secciones", "teads", "banner", "whatsapp", "suscrib",
+              "publicidad", "compartir", "comentarios", "politica de",
+              "close menu", "open menu", "menu principal")
+
+# Vocabulario de secciones/menus: una linea formada mayormente por estas
+# palabras ("Politica Economia Deportes Policiales Mundo Salud FNE
+# Cultura") es la cabecera del diario, no cronica -> se descarta.
+_CATEGORIAS_DIARIO = {
+    "politica", "economia", "deportes", "policiales", "mundo",
+    "salud", "fne", "cultura", "sociedad", "espectaculos",
+    "nacionales", "provinciales", "tecnologia", "opinion",
+    "editorial", "agro", "rural", "turismo", "ciencia", "clima",
+    "transito", "servicios", "horoscopo", "edicion", "impresa",
+    "inicio", "contacto", "newsletter", "ultimas", "noticias",
+    "actualidad", "judiciales", "espectaculo", "gastronomia",
+    "musica", "cine", "virales", "tendencias", "internacionales",
+    "regionales", "locales", "sucesos", "secciones", "menu",
+    "buscar", "login", "ingresar", "registrate", "suscribite",
+    "momento", "vivo", "podcast", "videos", "fotos", "news",
+    "columnistas", "cartas", "lectores", "clasificados",
+    "necrologicas", "funerales", "farmacia", "turnos", "radio",
+    "tiempo", "dolar", "euro", "merval", "cripto",
+}
+
+
+def _limpiar_texto_nota(texto_crudo):
+    """Pre-procesador de la nota pegada/descargada: descarta las lineas
+    cortas, las de menu/banner del diario y las cabeceras de secciones
+    (lineas hechas casi por completo de nombres de categorias); conserva
+    solo las 25 oraciones sustanciales que se envian a Gemini."""
+    lineas = [l.strip() for l in str(texto_crudo or "").split("\n")
+              if len(l.strip()) > 35]
+    limpias = []
+    for l in lineas:
+        low = l.lower()
+        if any(b in low for b in _BASURA_NOTA):
+            continue
+        toks = [t for t in re.split(r"[^\wáéíóúñü]+", low) if t]
+        if (toks and sum(t in _CATEGORIAS_DIARIO for t in toks)
+                / len(toks) >= 0.6):
+            continue  # cabecera de categorias, no cronica
+        limpias.append(l)
+    return "\n".join(limpias[:25])
+
+
+def _prompt_nota_completa(texto):
+    return (
+        "Eres un perito vial forense de Jujuy, Argentina. Analiza esta "
+        "crónica periodística:\n\"\"\"" + texto + "\"\"\"\n\n"
+        "Extrae rigurosamente:\n"
+        "1. jurisdiccion: Debe ser estrictamente una de: ['San Pedro de "
+        "Jujuy', 'Ciudad Perico', 'Monterrico', 'El Carmen', 'Palpalá', "
+        "'San Salvador de Jujuy', 'Rutas']. Si menciona San Pedro, DEBE "
+        "ser 'San Pedro de Jujuy'.\n"
+        "2. arteria_principal: Nombre de la calle principal (ej: "
+        "'Avenida Brasil').\n"
+        "3. arteria_secundaria: Calle transversal del cruce si la hay "
+        "(ej: 'Avenida Haití'), o null.\n"
+        "4. vehiculo_1: Vehículo principal involucrado (ej: 'Moto').\n"
+        "5. vehiculo_2: Contraparte (ej: 'Remís / Auto'). NUNCA pongas "
+        "'Ninguno' si chocó contra un auto/remís.\n"
+        "6. victimas_cantidad: Número entero de heridos/fallecidos.\n"
+        "7. victimas_estado: 'Leve', 'Grave', 'Fatal' o 'Solo Daños'. "
+        "(Fractura = 'Grave').\n"
+        "8. resumen: Síntesis técnica de EXACTAMENTE 2 oraciones sobre "
+        "la mecánica del choque y consecuencias: qué vehículos chocaron, "
+        "en qué esquina/ruta de qué ciudad y el estado de los heridos. "
+        "PROHIBIDO incluir palabras de navegación, banners o "
+        "secciones.\n"
+        "9. fecha_siniestro: fecha del hecho en formato 'AAAA-MM-DD'. "
+        "Si la crónica dice 'ayer', 'anoche', 'hace algunas noches' o "
+        "menciona un día/mes, calculá la fecha estimada a partir de la "
+        "fecha de publicación del artículo (estamos en 2026). PROHIBIDO "
+        "dejar la fecha vacía.\n"
+        "10. Si el texto proviene de una publicación informal (Facebook, "
+        "WhatsApp, cadenas), INFIERE la jurisdiccion y la arteria por "
+        "las referencias locales (ej: 'en Perico frente a la feria "
+        "minorista' -> jurisdiccion 'Ciudad Perico' y arteria_principal "
+        "'Avenida República de Italia', el acceso a la feria); el hito o "
+        "barrio citado va en referencia_local.\n\n"
+        "Responde EXCLUSIVAMENTE un JSON valido con estas claves.")
+
+
+def _extraer_nota_completa(texto):
+    """Ingesta inteligente: extraccion contextual completa via Gemini.
+
+    Gemini es OBLIGATORIO: no hay fallback de reglas locales. Ante
+    cualquier fallo se imprime el traceback real en consola y se relanza
+    la excepcion para que el endpoint informe la causa exacta."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY no configurada")
+    ultimo = RuntimeError("Gemini no respondio")
+    for modelo in GEMINI_MODELOS:
+        try:
+            r = requests.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{modelo}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "contents": [{"role": "user", "parts": [
+                        {"text": _prompt_nota_completa(texto[:8000])}]}],
+                    "generationConfig": {
+                        "maxOutputTokens": 700, "temperature": 0.25,
+                        "responseMimeType": "application/json"},
+                },
+                timeout=30)
+            if r.status_code != 200:
+                ultimo = RuntimeError(
+                    f"{modelo}: HTTP {r.status_code} {r.text[:200]}")
+                print(f"[extraer-nota] {ultimo}", file=sys.stderr)
+                continue
+            out = "".join(
+                p.get("text", "")
+                for c in r.json().get("candidates", [])
+                for p in c.get("content", {}).get("parts", []))
+            d = json.loads(re.sub(r"```(?:json)?", "", out).strip())
+            if isinstance(d, dict):
+                return d
+            ultimo = RuntimeError(f"{modelo}: respuesta sin JSON valido")
+        except Exception as exc:
+            traceback.print_exc()
+            ultimo = exc
+    raise ultimo
+
+
+_RESUMEN_BASURA = re.compile(
+    r"(?i)(window\.[\w$.]+|teads_analytics|close\s*menu|open\s*menu|"
+    r"men[uú]\s*principal|ir\s+al\s+contenido|saltar\s+al\s+contenido|"
+    r"secciones|newsletter|suscrib\w*|publicidad|whatsapp\s*share|"
+    r"facebook\s*share|compartir\s+en|leer\s+mas|ver\s+mas)")
+
+
+_ABREV_RESUMEN = re.compile(
+    r"(?i)(?:av|dr|dra|sr|sra|gral|ing|lic|km|n°|num)\.$|"
+    r"(?:rn|rp|ruta)\s*\w*\.$")
+
+
+def _limpiar_resumen_noticia(res):
+    """Saca del resumen restos de navegacion/publicidad del diario y lo
+    recorta a un maximo de 2 oraciones limpias."""
+    s = " ".join(str(res or "").split())
+    s = _RESUMEN_BASURA.sub(" ", s)
+    s = re.sub(r"\.(\s*\.)+", ". ", s)  # restos ". ." de menus/scripts
+    s = re.sub(r"(?i)^(?:(?:fne|cultura|deportes|policiales?|sociedad|"
+               r"economia|espectaculos|nacionales|provinciales|"
+               r"secciones|menu)[\s:.\-]*)+", "", s)
+    partes = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", s)
+              if p.strip()]
+    frases = []
+    for p in partes:
+        # Reincorpora cortes falsos por abreviatura ("Av.", "RN 66.") o
+        # fragmentos que quedaron sin cierre de oracion.
+        if frases and (not frases[-1].endswith((".", "!", "?", "…"))
+                       or _ABREV_RESUMEN.search(frases[-1])):
+            frases[-1] += " " + p
+        else:
+            frases.append(p)
+    s = " ".join(frases[:2])
+    return " ".join(s.split())[:400]
+
+
+_MESES_NOMBRE = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5,
+    "junio": 6, "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9,
+    "octubre": 10, "noviembre": 11, "diciembre": 12,
+}
+
+
+def _fecha_nombre_mes(texto):
+    """Parsea '24 de octubre de 2026' (nombre de mes en espanol)."""
+    m = re.search(
+        r"\b(\d{1,2})\s+de\s+([a-z\xe1\xe9\xed\xf3\xfa]+)\s+de?\s*(\d{4})",
+        (texto or "").lower())
+    if not m:
+        return None
+    mes = _MESES_NOMBRE.get(m.group(2))
+    if not mes:
+        return None
+    try:
+        return datetime(int(m.group(3)), mes, int(m.group(1))).date()
+    except ValueError:
+        return None
+
+
+def _parse_fecha_libre(s):
+    """Cualquier formato razonable -> date o None (ISO, dd/mm/aaaa,
+    'D de mes de aaaa', RFC 2822)."""
+    s = (s or "").strip()
+    f = _fecha_nombre_mes(s) or _fecha_de_texto(s)
+    if f:
+        return f
+    try:
+        return datetime.fromisoformat(s[:10]).date()
+    except ValueError:
+        pass
+    try:
+        return parsedate_to_datetime(s).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _extraer_fecha_html(doc):
+    """Fecha de publicacion desde metadatos del HTML (JSON-LD,
+    article:published_time, pubdate, datetime) o del propio cuerpo."""
+    for pat in (
+            r'"datePublished"\s*:\s*"([^"]{8,40})"',
+            r"article:published_time[\"']?\s*content=[\"']([^\"']{8,40})",
+            r"(?:pubdate|publish(?:ed)?(?:_| )date|fecha)[^>]{0,40}?"
+            r"(?:datetime|content)=[\"']([^\"']{8,40})"):
+        m = re.search(pat, doc, re.I)
+        if m:
+            f = _parse_fecha_libre(m.group(1))
+            if f:
+                return f
+    return _fecha_nombre_mes(doc[:6000])
+
+
+def _norm_victimas_estado(datos):
+    """Normaliza victimas_estado a ILESO|LEVE|GRAVE|FATAL; lo deduce de
+    la gravedad cuando Gemini no lo devuelve."""
+    e = str(datos.get("victimas_estado") or "").strip().upper()
+    e = {"ILESOS": "ILESO", "ILESO": "ILESO", "LEVE": "LEVE",
+         "LEVES": "LEVE", "GRAVE": "GRAVE", "GRAVES": "GRAVE",
+         "FATAL": "FATAL", "FATALES": "FATAL", "FALLECIDO": "FATAL",
+         "FALLECIDOS": "FATAL", "MUERTO": "FATAL", "MUERTOS": "FATAL",
+         "SOLO DANOS": "ILESO", "SOLO DAÑOS": "ILESO",
+         "DANOS": "ILESO", "DAÑOS": "ILESO",
+         "SIN LESIONES": "ILESO"}.get(e)
+    if e:
+        return e
+    grv = str(datos.get("gravedad") or "").upper()
+    if "FATAL" in grv:
+        return "FATAL"
+    if "GRAVE" in grv:
+        return "GRAVE"
+    if "DANO" in grv:
+        return "ILESO"
+    return "LEVE"
+
+
+def _armar_extraccion_nota(texto):
+    """Pipeline comun de la nota completa: SOLO Gemini + geocoding.
+
+    PROHIBIDO el fallback de reglas locales (copiaban la cabecera del
+    diario al resumen). Devuelve el dict 'extraido' confirmable por el
+    usuario; lo comparten la ingesta por texto pegado y por URL."""
+    datos = _extraer_nota_completa(texto)
+    jur_txt = clasificar_jurisdiccion(texto)
+    if jur_txt == "OTRA":
+        jur_txt = ""
+    jur = (_norm_jurisdiccion_valor(datos.get("jurisdiccion"))
+           or _norm_jurisdiccion_valor(jur_txt))
+    # Guard hermetico: si el texto habla de San Pedro jamas cae a Perico.
+    if re.search(r"SAN PEDRO|INGENIO LA ESPERANZA|PATERSON",
+                 normalizar(texto)):
+        jur = "San Pedro de Jujuy"
+    c1 = _sanear_arteria(datos.get("arteria_principal"),
+                         datos.get("arteria_principal"))
+    c2 = _sanear_arteria(datos.get("arteria_secundaria"),
+                         datos.get("arteria_secundaria"))
+    if (c2 and c1 and limpiar_calle(c2) == limpiar_calle(c1)):
+        c2 = ""
+    ref = str(datos.get("referencia_local") or "").strip()
+    geo = geocodificar_noticia(c1, c2, jur or "")
+
+    def _norm_v(v, defecto):
+        n = str(v or "").strip().upper()
+        if "/" in n:  # 'Remís / Auto' -> primer vehiculo valido
+            n = n.split("/")[0].strip()
+        n = {"BICI": "BICICLETA", "AUTO": "AUTO", "MOTO": "MOTO",
+             "PEATON": "PEATON", "PEATÓN": "PEATON", "CAMION": "CAMION",
+             "CAMIÓN": "CAMION", "CAMIONETA": "CAMIONETA",
+             "COLECTIVO": "COLECTIVO", "NINGUNO": "NINGUNO",
+             "REMIS": "AUTO", "REMÍS": "AUTO", "TAXI": "AUTO",
+             "BUS": "COLECTIVO", "OMNIBUS": "COLECTIVO",
+             "SOLO DAÑOS": "SOLO DAÑOS", "SOLO DANOS": "SOLO DAÑOS",
+             "FATAL": "GRAVE"}.get(n, n)
+        return n or defecto
+
+    try:
+        vic_n = max(0, int(datos.get("victimas_cantidad")))
+    except (TypeError, ValueError):
+        vic_n = 1
+    estado = _norm_victimas_estado(datos)
+
+    return {"status": "ok", "extraido": {
+        "jurisdiccion": jur or "Región Valles",
+        "arteria_principal": c1.title() if c1 else "",
+        "arteria_secundaria": c2.title() if c2 else "",
+        "referencia_local": ref,
+        "vehiculo_1": _norm_v(datos.get("vehiculo_1"), "AUTO"),
+        "vehiculo_2": _norm_v(datos.get("vehiculo_2"), "NINGUNO"),
+        "gravedad": {"ILESO": "SOLO DAÑOS", "FATAL": "GRAVE"}.get(
+            estado, estado),
+        "victimas_cantidad": vic_n,
+        "victimas_estado": estado,
+        "fecha_siniestro": (
+            lambda f: f.isoformat() if f else ""
+        )(_parse_fecha_libre(str(datos.get("fecha_siniestro") or ""))
+          or _parse_fecha_libre(texto)),
+        "resumen": _limpiar_resumen_noticia(datos.get("resumen")),
+        "lat": geo["lat"], "lon": geo["lon"],
+        "geo_fuente": geo["fuente"],
+        "geo_nombre": geo.get("nombre") or "",
+        "geo_valido": bool(geo.get("coordenadas_validas")),
+        "fuente": "gemini",
+    }}
+
+
+@app.post("/api/extraer-nota-completa")
+def api_extraer_nota_completa():
+    """Pegado completo de una nota -> Gemini OBLIGATORIO + geocoding.
+
+    Sin fallback de reglas locales: si Gemini falla se informa el error
+    real (502) en lugar de disfrazarlo con datos inventados."""
+    payload = request.get_json(silent=True) or {}
+    crudo = str(payload.get("texto") or "").strip()
+    if len(crudo) < 40:
+        return jsonify({"status": "error",
+                        "mensaje": "pegá el cuerpo completo de la nota"}
+                       ), 400
+    # Pre-procesador: afuera menus/banners del diario antes de Gemini.
+    texto = _limpiar_texto_nota(crudo) or crudo[:8000]
+    try:
+        return jsonify(_armar_extraccion_nota(texto))
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"status": "error",
+                        "mensaje": f"Gemini no respondió: {exc}"}), 502
+
+
+@app.post("/api/extraer-nota-url")
+def api_extraer_nota_url():
+    """URL de una nota -> descarga el HTML con headers de navegador real,
+    extrae el texto de los parrafos del articulo limpiando menus y
+    scripts, y lo procesa con la misma logica de Gemini que el pegado."""
+    payload = request.get_json(silent=True) or {}
+    url = str(payload.get("url") or "").strip()
+    if not re.match(r"^https?://\S+$", url):
+        return jsonify({"status": "error",
+                        "mensaje": "pegá una URL válida (https://…)"}
+                       ), 400
+    try:
+        descargado, url_final = _descargar_cuerpo_noticia(url)
+    except requests.RequestException:
+        return jsonify({"status": "error",
+                        "mensaje": ("no se pudo descargar la nota desde "
+                                    "ese enlace; probá con la pestaña "
+                                    "de texto")}
+                       ), 400
+    if len(descargado) < 40:
+        return jsonify({"status": "error",
+                        "mensaje": ("la página no expuso el cuerpo de la "
+                                    "nota; probá pegando el texto")}
+                       ), 400
+    texto = _limpiar_texto_nota(descargado) or descargado[:8000]
+    try:
+        resp = _armar_extraccion_nota(texto)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"status": "error",
+                        "mensaje": f"Gemini no respondió: {exc}"}), 502
+    resp["url_final"] = url_final
+    return jsonify(resp)
 
 
 @app.post("/api/reportar")
@@ -614,6 +1133,11 @@ def api_reportar():
             "es_post_semaforos": "0",
             "target_es_grave": "1" if es_grave else "0",
             "target_same": "1" if es_grave else "0",
+            "url_noticia": str(payload.get("url_noticia") or "").strip()[:500],
+            "medio_prensa": str(
+                payload.get("medio_prensa") or "").strip()[:160],
+            "resumen_contexto": str(
+                payload.get("resumen_contexto") or "").strip()[:400],
         }
 
         with open(RUTA_CSV, "a", encoding="utf-8", newline="") as f:
@@ -868,10 +1392,19 @@ def _leer_env():
 
 # Prioriza la variable de entorno del sistema; si falta, lee el .env local.
 GEMINI_API_KEY = (
-    os.environ.get("GEMINI_API_KEY") or _leer_env().get("GEMINI_API_KEY") or ""
+    os.environ.get("GEMINI_API_KEY") or _leer_env().get("GEMINI_API_KEY")
+    or ""
 )
-# Modelos flash disponibles en la API (los 1.5/2.0 ya fueron retirados).
-GEMINI_MODELOS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+# Modelos verificados contra la API (nov-2026): gemini-2.5-flash-lite ya
+# no existe (404) y la cuota diaria de gemini-2.5-flash se agota rapido;
+# los 3.1-flash-lite responden 200 con cuota propia. 2.5-flash queda
+# ultimo por si renueva su cupo.
+GEMINI_MODELOS = (
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-2.5-flash",
+)
 
 _STATS = None
 
@@ -1189,7 +1722,7 @@ def _banco_trivia():
     s = _stats_globales()
     top_calle, top_n = s["top_calles"][0]
     segunda_calle, seg_n = s["top_calles"][1]
-    return [
+    base = [
         {"pregunta": f"El {s['pct_moto']}% de los siniestros del corredor involucra motocicletas.",
          "es_verdadero": True,
          "explicacion": f"Exacto: las motos concentran el {s['pct_moto']}% de los {s['total']} siniestros registrados.",
@@ -1251,9 +1784,126 @@ def _banco_trivia():
          "explicacion": f"Falso: la edad promedio es {s['edad_promedio']} años — predominan los jóvenes.",
          "fuente_dato": "Dataset: edad_victima"},
     ]
+    return [{"dificultad": 1, **it} for it in base] + TRIVIA_INGENIERIA
 
 
-def _mito_gemini(usados):
+# Preguntas de ingenieria vial y seguridad general, ordenadas por
+# dificultad tecnica: 2 = avanzado, 3 = experto en transito.
+TRIVIA_INGENIERIA = [
+    {"pregunta": "Duplicar la velocidad duplica la distancia de frenado.",
+     "es_verdadero": False,
+     "explicacion": "Falso: la distancia de frenado crece con el cuadrado de la velocidad (d ≈ v²/2μg). Al doble de velocidad se necesita ~4 veces más distancia.",
+     "fuente_dato": "Física del frenado",
+     "dificultad": 2},
+    {"pregunta": "Con calzada mojada, la distancia de frenado puede aumentar hasta un 50% o más a igual velocidad.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: el coeficiente de adherencia μ del asfalto húmedo cae frente al seco, y la frenada se estira en proporción inversa.",
+     "fuente_dato": "Adherencia neumático-calzada",
+     "dificultad": 2},
+    {"pregunta": "La energía que debe disipar el cuerpo en un choque a 60 km/h es cuatro veces la de uno a 30 km/h.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: Ec = ½mv². El doble de velocidad cuadruplica la energía cinética a absorber en el impacto.",
+     "fuente_dato": "Cinemática del choque",
+     "dificultad": 2},
+    {"pregunta": "Una moto es más visible para los autos que otro auto porque es más angosta y ágil.",
+     "es_verdadero": False,
+     "explicacion": "Falso: el frente angosto y el único faro hacen que la moto 'desaparezca' en los puntos ciegos del auto (pilar A y espejos) — causa clásica de giros con invasión.",
+     "fuente_dato": "Puntos ciegos / detectabilidad",
+     "dificultad": 2},
+    {"pregunta": "Frenar fuerte con la moto inclinada en curva es tan seguro como frenar en recta.",
+     "es_verdadero": False,
+     "explicacion": "Falso: inclinado, parte de la adherencia disponible ya se gasta en la fuerza lateral de la curva; frenar agota el 'presupuesto de fricción' y produce la caída low-side.",
+     "fuente_dato": "Dinámica de la moto",
+     "dificultad": 2},
+    {"pregunta": "Un camión cargado necesita más distancia para detenerse que un auto a igual velocidad.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: su masa es mucho mayor y la adherencia específica por rueda no escala igual; por eso invadir su distancia de seguridad es tan peligroso.",
+     "fuente_dato": "Física del frenado",
+     "dificultad": 2},
+    {"pregunta": "La distancia total de detención incluye los metros recorridos durante el tiempo de reacción, antes de pisar el freno.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: con ~1 s de reacción, a 90 km/h se recorren ~25 m antes de que el freno empiece a actuar.",
+     "fuente_dato": "Tiempo de reacción",
+     "dificultad": 3},
+    {"pregunta": "Al frenar fuerte, la rueda trasera de la moto gana adherencia y es la que más conviene bloquear.",
+     "es_verdadero": False,
+     "explicacion": "Falso: la frenada transfiere carga hacia adelante y alivia la trasera, que pierde adherencia y se bloquea fácil — por eso el freno delantero hace el 70-80% del trabajo.",
+     "fuente_dato": "Transferencia de carga",
+     "dificultad": 3},
+    {"pregunta": "Un camión puede ocultar un auto completo en sus 'ángulos muertos' laterales y traseros.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: las 'no-zones' de un camión cubren carriles enteros; la regla práctica es: si no ves sus espejos, el chofer no te ve.",
+     "fuente_dato": "Puntos ciegos de pesados",
+     "dificultad": 3},
+    {"pregunta": "El casco protege aumentando el tiempo de desaceleración de la cabeza en el impacto.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: la carcasa y el liner extienden el Δt del impacto, reduciendo el pico de fuerza sobre el cráneo (impulso = F·Δt).",
+     "fuente_dato": "Biomecánica del impacto",
+     "dificultad": 3},
+    {"pregunta": "A velocidad de ruta, para doblar a la derecha en moto hay que empujar el manubrio hacia la derecha (contramanillar).",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: por encima de ~30 km/h rige el contravolante — empujar el manillar del lado del giro inclina la moto hacia esa curva.",
+     "fuente_dato": "Dinámica de la moto",
+     "dificultad": 3},
+    {"pregunta": "El aquaplaning ocurre cuando una cuña de agua levanta el neumático y rompe el contacto con el asfalto.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: a partir de cierta velocidad el dibujo no alcanza a evacuar el agua y el vehículo flota — frenar o girar ahí es perder el control.",
+     "fuente_dato": "Adherencia hidrodinámica",
+     "dificultad": 3},
+    {"pregunta": "El pilar A del parabrisas nunca puede ocultar a un motociclista que se acerca a una intersección.",
+     "es_verdadero": False,
+     "explicacion": "Falso: el pilar A genera un cono de sombra donde una moto entera queda oculta; por eso hay que mover la cabeza al mirar antes de doblar.",
+     "fuente_dato": "Puntos ciegos / intersecciones",
+     "dificultad": 3},
+    {"pregunta": "En moto, usar solo el freno trasero detiene casi igual que usar ambos frenos.",
+     "es_verdadero": False,
+     "explicacion": "Falso: la rueda trasera se alivia en la frenada y aporta ~20-30%; usar solo ese freno casi duplica la distancia de detención.",
+     "fuente_dato": "Reparto de frenada",
+     "dificultad": 3},
+    {"pregunta": "En una rotonda sin semáforo tiene prioridad el vehículo que ya circula dentro de la glorieta.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: la Ley 24.449 da prioridad al circulante dentro de la rotonda; quien ingresa debe ceder el paso.",
+     "fuente_dato": "Ley 24.449 — prioridades",
+     "dificultad": 2},
+    {"pregunta": "Al adelantar a un ciclista la ley exige una separación lateral mínima de 1,5 metros.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: el art. 42 bis de la Ley 24.449 exige 1,5 m al adelantar peatones, ciclistas y motoristas (o reducir la velocidad).",
+     "fuente_dato": "Ley 24.449 art. 42 bis",
+     "dificultad": 2},
+    {"pregunta": "Ante un paso a nivel sin barreras ni señales se puede cruzar a la velocidad de la vía.",
+     "es_verdadero": False,
+     "explicacion": "Falso: la norma exige velocidad precautoria y detenerse si es necesario hasta verificar que no viene el tren — el tren no puede frenar.",
+     "fuente_dato": "Ley 24.449 — cruces ferroviarios",
+     "dificultad": 2},
+    {"pregunta": "Si el semáforo está apagado o en intermitente, la bocacalle funciona con prioridad de la derecha.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: con señalización inoperante rigen las reglas generales — hay que ceder al vehículo que viene por la derecha.",
+     "fuente_dato": "Ley 24.449 — prioridades",
+     "dificultad": 2},
+    {"pregunta": "Un camión que dobla a la derecha deja siempre un carril seguro entre su lateral y el cordón.",
+     "es_verdadero": False,
+     "explicacion": "Falso: ese hueco es el ángulo muerto del acoplado y se cierra al completar el giro — la 'barreda' es la trampa clásica de los giros de pesados.",
+     "fuente_dato": "Zonas ciegas de pesados",
+     "dificultad": 3},
+    {"pregunta": "En una frenada de emergencia con ABS hay que 'bombear' el pedal para que el sistema funcione.",
+     "es_verdadero": False,
+     "explicacion": "Falso: el ABS ya modula la presión ~15 veces por segundo; se pisa firme y sostenido. Bombear alarga la frenada.",
+     "fuente_dato": "Sistemas de frenado",
+     "dificultad": 3},
+    {"pregunta": "Usar el celular al volante multiplica ~4 veces el riesgo de siniestro, comparable a conducir con alcohol en sangre.",
+     "es_verdadero": True,
+     "explicacion": "Verdadero: la distracción por celular iguala el deterioro de tiempo de reacción de ~0,5 g/l de alcohol — por eso está prohibido en todo momento.",
+     "fuente_dato": "Distracción al conducir",
+     "dificultad": 2},
+    {"pregunta": "Con luces altas se ve mejor en niebla densa porque el haz es más potente.",
+     "es_verdadero": False,
+     "explicacion": "Falso: la luz alta rebota en las gotas y forma una pared blanca: en niebla se usan las bajas (y balizas si es extrema) con velocidad muy reducida.",
+     "fuente_dato": "Conducción con niebla",
+     "dificultad": 2},
+]
+
+
+def _mito_gemini(usados, nivel=1):
     """Pide a Gemini un mito en JSON estricto; None si falla."""
     sistema = (
         "Sos un generador de trivia de seguridad vial para el Observatorio de "
@@ -1264,8 +1914,15 @@ def _mito_gemini(usados):
         "oraciones), fuente_dato (origen breve, ej. 'Dataset local' o "
         "'Seguridad vial general'). Mezclá afirmaciones verdaderas y falsas "
         "plausibles sobre el corredor vial jujeño.")
+    dificultad = {
+        1: "basica, para principiantes (mitos comunes de seguridad vial)",
+        2: "intermedia (fisica del frenado, adherencia, visibilidad)",
+        3: "tecnica avanzada (cinematica del choque, dinamica de la moto, "
+           "puntos ciegos de vehiculos pesados)",
+    }.get(nivel, "basica")
     previas = "; ".join(usados[-4:]) if usados else "ninguna"
-    prompt = f"Generá UN mito/afirmacion NUEVO (no repitas estos: {previas})."
+    prompt = (f"Generá UN mito/afirmacion NUEVO de dificultad {dificultad} "
+              f"(no repitas estos: {previas}).")
     try:
         texto = _preguntar_gemini(prompt, sistema=sistema,
                                 max_tokens=500, temperatura=0.9)
@@ -1283,9 +1940,13 @@ def api_trivia_mitos():
     """Tarjeta Verdadero/Falso sin repetir (el cliente envia 'usados')."""
     payload = request.get_json(silent=True) or {}
     usados = payload.get("usados") or []
+    try:
+        nivel = min(max(int(payload.get("nivel") or 1), 1), 3)
+    except (TypeError, ValueError):
+        nivel = 1
 
     if GEMINI_API_KEY:
-        datos = _mito_gemini(usados)
+        datos = _mito_gemini(usados, nivel)
         if datos:
             return jsonify({
                 "pregunta": str(datos["pregunta"]),
@@ -1294,23 +1955,35 @@ def api_trivia_mitos():
                 "fuente_dato": str(datos.get("fuente_dato") or "Gemini"),
                 "id": f"g-{random.randrange(10**6)}",
                 "fuente": "gemini",
+                "dificultad": nivel,
             })
 
     banco = _banco_trivia()
     disponibles = [(i, b) for i, b in enumerate(banco)
                    if f"b{i}" not in usados]
     if not disponibles:
-        return jsonify({"agotado": True,
-                        "mensaje": "Completaste todo el banco de mitos."})
-    i, item = random.choice(disponibles)
+        # Banco agotado en la partida: remezclar todo (modo infinito,
+        # la partida solo termina al perder las 3 vidas).
+        disponibles = list(enumerate(banco))
+    # A mayor nivel (racha del jugador) se priorizan preguntas de mayor
+    # dificultad tecnica; si se agotan, degrada a las disponibles.
+    ideal = [x for x in disponibles if x[1].get("dificultad", 1) == nivel]
+    candidatos = (ideal
+                  or [x for x in disponibles
+                      if x[1].get("dificultad", 1) <= nivel]
+                  or disponibles)
+    i, item = random.choice(candidatos)
     return jsonify({**item, "id": f"b{i}", "fuente": "banco"})
 
 
 # ------------- Simulador de decisiones: situaciones por modo -------------
 
-def _sit(titulo, lugar, texto, op_a, op_b):
-    """op_*: (texto, es_segura, impacto, explicacion)."""
+def _sit(titulo, lugar, texto, op_a, op_b, dificultad=1, modo="MOTO"):
+    """op_*: (texto, es_segura, impacto, explicacion).
+    dificultad: 1 principiante, 2 avanzado, 3 experto en transito.
+    modo: vehiculo protagonista (para stats reales del feedback)."""
     return {"titulo": titulo, "lugar": lugar, "situacion": texto,
+            "dificultad": dificultad, "modo": modo,
             "opciones": [
                 {"texto": op_a[0], "segura": op_a[1], "impacto": op_a[2],
                  "explicacion": op_a[3]},
@@ -1339,6 +2012,20 @@ SITUACIONES = {
               "La iluminación y el tránsito residual reducen despistes y asaltos: el riesgo por metro es mucho menor."),
              ("El atajo oscuro para llegar rápido", False, "-55%",
               "Calles oscuras de madrugada concentran siniestros solitarios sin testigos: la demora en auxilio agrava el resultado.")),
+        _sit("Frenada de emergencia en bajada", "Bajada con gravilla suelta",
+             "Bajás una pendiente a 45 km/h y un perro cruza. Hay gravilla suelta en la banquina.",
+             ("Frenás progresivo con ambos frenos, moto derecha", True, "+85%",
+              "Con la moto vertical la adherencia se reparte entre ambas ruedas: el delantero aporta el 70% sin bloquear."),
+             ("Clavás el freno trasero y doblás a la banquina", False, "-60%",
+              "Bloquear la trasera sobre gravilla desliza la rueda y te lleva a la banquina igual: low-side casi seguro."),
+             3),
+        _sit("El camión que dobla", "Cruce con camión de acarreo",
+             "Un camión lento ocupa carril y medio para doblar a la derecha; queda un hueco junto al cordón.",
+             ("Esperás atrás hasta que complete la maniobra", True, "+80%",
+              "El hueco que deja el camión al doblar es trampa: se cierra cuando el trailer 'corta' la curva."),
+             ("Te metés por el hueco del cordón para pasarlo", False, "-65%",
+              "El interior de la curva de un camión es su peor ángulo muerto: te vuelve invisible justo cuando el trailer barre ese espacio."),
+             2),
     ],
     "BICICLETA": [
         _sit("Hora pico en la avenida", "Av. San Martín, 18 h",
@@ -1359,6 +2046,20 @@ SITUACIONES = {
               "Detrás del colectivo no ves ni te ven: el peatón que baja por delante y el auto que viene son puntos ciegos."),
              ("Lo pasás por la derecha junto al cordón", False, "-50%",
               "El hueco junto al cordón es donde bajan los pasajeros y donde el colectivo arranca: trampa clásica.")),
+        _sit("Lluvia recién caída", "Avenida con pintura resbalosa",
+             "Primeras gotas después de días secos: la calzada tiene manchas de aceite y líneas de señalización mojadas.",
+             ("Reducís y evitás pisar líneas y manchas oscuras", True, "+80%",
+              "La primera lluvia emulsiona el aceite acumulado: la adherencia cae al mínimo justo sobre pintura y manchas."),
+             ("Mantenés ritmo, la bici frena igual con lluvia fina", False, "-55%",
+              "Los frenos de llanta mojados pierden potencia y la cubierta patina sobre la película de agua+aceite."),
+             2),
+        _sit("Puerta que se abre", "Calle angosta con autos estacionados",
+             "Circulás pegado a los autos estacionados para dejar pasar el tránsito.",
+             ("Dejás un metro de puerta aunque te apuren", True, "+85%",
+              "El 'dooring' es el siniestro urbano más evitable: un metro de distancia anula la puerta sorpresa."),
+             ("Pegado a los autos: el hueco es seguro", False, "-50%",
+              "La puerta que se abre mide ~1 m: dentro de esa franja no hay tiempo de reacción posible."),
+             2),
     ],
     "PEATON": [
         _sit("Cruce a mitad de cuadra", "Av. Belgrano, 19 h",
@@ -1379,6 +2080,20 @@ SITUACIONES = {
               "Cruzar mirando el celular reduce a cero tu margen de reacción ante el auto que dobla sin frenar."),
              ("Contestás caminando, ya conocés la esquina", False, "-45%",
               "La familiaridad engaña: con la vista en el celular no registrás ni el auto que dobla ni el que pasa en amarillo.")),
+        _sit("Avenida de doble mano, primer auto frenado", "Avenida ancha, 13 h",
+             "Un auto frena en el primer carril para dejarte pasar a mitad de cuadra. El segundo carril sigue libre.",
+             ("No cruzás hasta ver el segundo carril completo", True, "+90%",
+              "La 'trampa del segundo carril': el auto frenado te tapa al vehículo que viene por el otro carril y a él lo tapás vos."),
+             ("Cruzás rápido, el conductor te hizo seña", False, "-60%",
+              "La seña del primer auto no controla el segundo carril: los atropellos así son de los más graves del dataset."),
+             3),
+        _sit("Ruta sin banquina iluminada", "Ruta Provincial 47, 21 h",
+             "Debés caminar 800 m por la banquina de la ruta. No hay luz y el celular tiene poca batería.",
+             ("Del lado contrario al tránsito, linterna y distancia del borde", True, "+85%",
+              "Caminar de frente a los vehículos te da los segundos de reacción que la oscuridad roba; la linterna te hace visible a +150 m."),
+             ("Del lado del tránsito, a oscuras y al borde", False, "-65%",
+              "De espaldas al tránsito y sin luz sos invisible hasta que el auto está encima: el margen de maniobra se anula."),
+             2),
     ],
     "AUTO": [
         _sit("Hora pico en la Terminal", "Salida de la Terminal, 18 h",
@@ -1399,8 +2114,106 @@ SITUACIONES = {
               "El auto estacionado en la esquina crea puntos ciegos para todos los que doblan: generás el siniestro de otro."),
              ("En la esquina igual, son unos minutos", False, "-40%",
               "Cinco minutos bloqueando la visibilidad bastan para que alguien doble a ciegas y choque.")),
+        _sit("Caravana detrás del camión", "Ruta Nacional 9, lluvia leve",
+             "Seguís a un camión a ~15 m para 'aprovechar la estela'; el spray de sus ruedas te empapa el parabrisas.",
+             ("Abrís distancia a 3 segundos o más y bajás 10 km/h", True, "+80%",
+              "El spray del camión te deja medio ciego y su distancia de frenado es mayor: la estela ahorra nafta y compra siniestro."),
+             ("Te quedás cerca: si él frena, frenás vos también", False, "-55%",
+              "A 90 km/h tu tiempo de reacción ya consumió ~25 m; con visibilidad por spray el margen es negativo."),
+             3),
+        _sit("Cruce ciego en barrio", "Calle sin señalizar, casco urbano",
+             "Llegás a una esquina sin semáforo ni carteles, con setos altos que tapan ambos laterales.",
+             ("Casi detenerte, asomar metro a metro y pasar", True, "+85%",
+              "En cruce sin prioridad la regla es ceder al que viene por la derecha: asomar despacio te hace visible antes de exponerte."),
+             ("Pasás firme: el de la derecha te tiene que ver", False, "-50%",
+              "Los setos crean un punto ciego mutuo: si el otro hace lo mismo, se encuentran en el medio del cruce."),
+             2),
     ],
 }
+
+
+# Banco universal de dilemas tecnicos (Ley 24.449 + fisica vial): se usa en
+# el modo supervivencia infinito, mezclado con los bancos por vehiculo.
+# Cada uno lleva 'modo' para que el feedback cite stats reales del dataset.
+SITUACIONES_UNIVERSALES = [
+    _sit("Prioridad real en la rotonda", "Rotonda Acceso Sur RN 66",
+         "Vas a ingresar a una rotonda y un auto circula por la calzada circular acercándose por tu izquierda. ¿Quién pasa primero?",
+         ("Vos, porque tenés prioridad reglamentaria de paso por la derecha", False, "-55%",
+          "Falso: la prioridad de la derecha NO aplica dentro de una rotonda — el que ya circula no está 'a tu derecha' en el sentido legal, ambos viajan en el mismo sentido giratorio."),
+         ("El vehículo que ya está circulando dentro del anillo giratorio", True, "+88%",
+          "Correcto: el art. 43 de la Ley 24.449 prioriza al circulante dentro de la glorieta; quien ingresa debe ceder el paso sin importar la arteria por la que llegue."),
+         3, "AUTO"),
+    _sit("Sobrepaso de un ciclista", "Av. La Bandera hacia RN 9",
+         "Vas en auto por avenida y adelante circula un ciclista por el borde. Para sobrepasarlo en forma segura:",
+         ("Tocar bocina corta para avisarle y rebasarlo manteniendo 0,5 m de margen dentro del mismo carril", False, "-65%",
+          "Incorrecto doblemente: la bocina imprevista desestabiliza al ciclista y 0,5 m es distancia de roce — la norma exige 1,5 m mínimos, lo que implica ocupar el carril vecino."),
+         ("Cambiar de carril o abrirse dejando un margen lateral mínimo de 1,5 m, sin bocina imprevista", True, "+85%",
+          "Correcto: el art. 42 bis de la Ley 24.449 exige 1,5 m de separación lateral al adelantar ciclistas, peatones y motoristas; si no hay espacio, se espera."),
+         3, "BICICLETA"),
+    _sit("Hidroplaneo (aquaplaning)", "RN 66, lluvia torrencial",
+         "Empieza una lluvia torrencial y sentís que la dirección del auto 'flota', perdiendo contacto con el asfalto. ¿Qué maniobra corresponde?",
+         ("Clavar el freno a fondo para detener el vehículo antes de perder la trayectoria", False, "-70%",
+          "Incorrecto: con el neumático 'flotando' sobre la cuña de agua, frenar en seco bloquea y rompe el poco contacto que queda — producís el trompo que querías evitar."),
+         ("Soltar suavemente el acelerador sin frenar brusco ni girar el volante hasta recuperar adherencia", True, "+80%",
+          "Correcto: en aquaplaning la única recuperación es reducir velocidad sin inputs bruscos; al recuperar adherencia el auto responde solo. Frenar o girar agrava el desliz."),
+         3, "AUTO"),
+    _sit("Pendiente angosta: ¿quién retrocede?", "Calle de sierra en subida",
+         "En una calle angosta con fuerte pendiente donde no entran dos vehículos, se encuentran de frente. ¿Quién debe retroceder?",
+         ("El vehículo que va subiendo, porque tiene mejor visibilidad", False, "-50%",
+          "Incorrecto: la regla prioriza al que sube porque retroceder en pendiente ascendente es la maniobra más difícil e insegura — no se le exige al que ya la está sorteando."),
+         ("El vehículo que va descendiendo, salvo que lleve acoplado", True, "+85%",
+          "Correcto: en pendientes la prioridad la tiene quien asciende; retrocede el que desciende — excepto si arrastra acoplado o semirremolque, donde el retroceso propio es más riesgoso."),
+         3, "AUTO"),
+    _sit("Semáforo amarillo intermitente", "Av. Éxodo, cruce nocturno",
+         "Llegás a un cruce con semáforo en amarillo titilante:",
+         ("Podés cruzar con prioridad si no ves luces en la transversal", False, "-55%",
+          "Incorrecto: el amarillo intermitente NO concede prioridad — solo advierte precaución, y la transversal puede tener rojo intermitente y conservar su paso."),
+         ("Equivale a cartel de 'Ceda el paso': aminorar a velocidad de paso de hombre y cruzar solo si la vía está despejada", True, "+85%",
+          "Correcto: la Ley 24.449 equipara el amarillo intermitente a una señal de precaución/ceda el paso — se cruza a velocidad mínima cediendo a quien llega primero o por la derecha."),
+         3, "AUTO"),
+    _sit("El hueco que deja el camión al doblar", "Empalme RN 9 y RP 42",
+         "Un camión con acoplado abre a la izquierda para doblar a la derecha. Queda un hueco entre su lateral y el cordón.",
+         ("Esperás atrás hasta que complete el giro", True, "+80%",
+          "El interior de la curva de un camión es su peor ángulo muerto: al completar el giro el trailer barre ese hueco — la 'barreda' te aplasta contra el cordón."),
+         ("Te metés por el hueco: total él ya te vio", False, "-65%",
+          "El chofer no te ve: los espejos cubren el lateral pero no el ángulo de barrido del acoplado. Es el siniestro característico de los giros de pesados."),
+         3, "CAMION"),
+    _sit("Paso a nivel sin barreras", "Paso a nivel, zona rural",
+         "Llegás a un paso a nivel sin barreras ni luces. A lo lejos parece no venir nada.",
+         ("Bajás a paso de hombre, mirás a ambos lados y cruzás", True, "+90%",
+          "La norma exige velocidad precautoria y detener la marcha si es necesario hasta verificar que no se aproxima el tren: el tren no puede frenar, vos sí."),
+         ("Cruzás a la velocidad de la ruta, total parece libre", False, "-70%",
+          "La perspectiva engaña la velocidad del tren: a 90 km/h no alcanzás a corregir si aparece. Los siniestros en pasos a nivel suelen ser fatales."),
+         3, "CAMION"),
+    _sit("Filtrar entre carriles en la moto", "Av. San Martín, hora pico",
+         "El tránsito está detenido en dos carriles. Entre los autos queda un canal para avanzar hasta el semáforo.",
+         ("Esperás en tu carril: filtrar entre carriles no está permitido", True, "+75%",
+          "La normativa argentina no habilita la circulación entre carriles: las puertas que se abren y los cambios de carril imprevistos lo convierten en la maniobra urbana más riesgosa de la moto."),
+         ("Filtrás despacio: a baja velocidad es seguro", False, "-55%",
+          "Aunque sea despacio, el auto que cambia de carril sin esperarte te deja sin escapatoria entre vehículos — no hay distancia de escape posible."),
+         2, "MOTO"),
+    _sit("La puerta que se abre", "Calle comercial, autos estacionados",
+         "Circulás pegado a la fila de autos estacionados y una puerta delantera empieza a abrirse.",
+         ("Circulás siempre a ~1 m de los estacionados, mirando ruedas y espejos", True, "+80%",
+          "La 'door zone' mata: el espacio que ocupa una puerta abierta es el peor carril. Anticipar la maniobra mirando ruedas/espejos da los metros de escape."),
+         ("Clavás los frenos pegado a la puerta", False, "-45%",
+          "Frenar a centímetros de la puerta te deja caer o te pone debajo del vehículo siguiente: la distancia preventiva, no la reacción, es lo que salva."),
+         2, "BICICLETA"),
+    _sit("Niebla en el corredor", "RP 42, 6:30 h, niebla densa",
+         "Niebla cerrada: visibilidad de ~40 m. Encendiste las luces altas para 'ver mejor'.",
+         ("Luces BAJAS + velocidad muy reducida + distancia extra", True, "+85%",
+          "La luz alta rebota en las gotas de niebla y te ciega más: con bajas, balizas si hace falta y velocidad precautoria proporcional a los ~40 m de visión."),
+         ("Altas y velocidad normal: con luz alcanza", False, "-50%",
+          "Las altas crean una pared blanca frente al parabrisas y el peatón o vehículo detenido aparece a 40 m: a 80 km/h recorrés 22 m por segundo."),
+         2, "AUTO"),
+    _sit("La carga que sobresale", "Camioneta con caños largos",
+         "Vas a transportar caños de 5 m en una camioneta: sobresalen más de medio metro por atrás de la caja.",
+         ("Señalizás con bandera V10/paño rojo y lo trasladás de día", True, "+80%",
+          "La norma exige señalizar toda carga que sobresalga: sin señalización, la moto que viene atrás no calcula el 'remo' invisible que le viene encima."),
+         ("Lo llevás igual a baja velocidad, son pocos km", False, "-50%",
+          "Aun a 40 km/h el extremo sobresaliente queda a la altura del pecho de un motociclista: sin señalización es una trampa invisible."),
+         3, "CAMIONETA"),
+]
 
 
 def _stats_modo(modo):
@@ -1487,33 +2300,47 @@ def _stats_edad(edad):
     }
 
 
-@app.post("/api/desafio-decision")
-def api_desafio_decision():
-    """Situacion callejera con 2 opciones segun edad y modo del jugador."""
-    payload = request.get_json(silent=True) or {}
-    modo = normalizar(payload.get("modo"))
-    if modo == "BICI":
-        modo = "BICICLETA"
-    if modo not in SITUACIONES:
-        modo = "MOTO"
+def _desafio_gemini(usados, nivel=1):
+    """Genera un dilema tecnico nuevo con Gemini (modo infinito)."""
+    sistema = (
+        "Sos un generador de dilemas de ingenieria vial y Ley Nacional de "
+        "Transito 24.449 para el Observatorio de Siniestralidad de los "
+        "Valles de Jujuy (Perico, Monterrico, El Carmen, San Salvador). "
+        "Respondé SOLO con un objeto JSON valido, sin markdown ni texto "
+        "extra, con las claves: titulo, lugar (un cruce o tramo real del "
+        "corredor jujeño), situacion (2-3 oraciones tecnicas), modo "
+        "(MOTO | AUTO | CAMIONETA | BICICLETA | PEATON | CAMION), opciones "
+        "(lista de EXACTAMENTE 2 objetos con claves texto, segura "
+        "(booleano), impacto ('+80%' o '-50%'), explicacion (la norma vial "
+        "o el dato tecnico que la fundamenta)). Exactamente UNA opcion "
+        "debe ser reglamentariamente correcta; la otra debe sonar "
+        "verosimil pero estar mal. Prioriza: prioridades de paso, "
+        "distancias de seguridad, fisica del frenado, zonas ciegas de "
+        "vehiculos pesados, manejo defensivo en mojado/niebla.")
+    dificultad = {1: "intermedia", 2: "alta", 3: "muy alta"}.get(nivel, "alta")
+    previas = "; ".join(str(u) for u in usados[-6:]) or "ninguna"
+    prompt = (f"Generá UN dilema de dificultad {dificultad} "
+              f"(no repitas estos: {previas}).")
     try:
-        edad = min(max(int(payload.get("edad") or 25), 10), 95)
-    except (TypeError, ValueError):
-        edad = 25
+        texto = _preguntar_gemini(prompt, sistema=sistema,
+                                  max_tokens=900, temperatura=0.9)
+        datos = json.loads(re.sub(r"^```(?:json)?|```$", "",
+                                  texto.strip(), flags=re.M).strip())
+        ops = datos.get("opciones")
+        if (isinstance(ops, list) and len(ops) == 2
+                and sum(1 for o in ops if o.get("segura")) == 1
+                and datos.get("situacion")):
+            return datos
+    except (RuntimeError, json.JSONDecodeError, AttributeError, TypeError):
+        return None
+    return None
 
-    usados = payload.get("usados") or []
-    banco = SITUACIONES[modo]
-    disponibles = [(i, s) for i, s in enumerate(banco)
-                   if f"{modo}-{i}" not in usados]
-    if not disponibles:
-        disponibles = list(enumerate(banco))  # reinicia el ciclo
-    i, sit = random.choice(disponibles)
 
-    stats = {
-        "modo": modo,
-        **_stats_modo(modo),
-        "edad_rango": _stats_edad(edad),
-    }
+def _stats_dilema(modo, edad, sit):
+    """Stats reales del modo para el feedback post-respuesta."""
+    stats = {"modo": modo, **_stats_modo(modo)}
+    if edad:
+        stats["edad_rango"] = _stats_edad(edad)
     # Si el dilema ocurre de noche, el feedback se contextualiza solo con
     # datos nocturnos (19-06h): evita contradicciones tipo 'peor franja tarde'.
     hora_sit = _hora_texto(f"{sit['lugar']} {sit['situacion']}")
@@ -1521,11 +2348,282 @@ def api_desafio_decision():
         noche = _stats_modo_nocturno(modo)
         if noche:
             stats["nocturno"] = {"hora": hora_sit, **noche}
+    return stats
+
+
+_DILEMA_IA_SISTEMA = (
+    "Eres un evaluador de ingenieria de transito y peritaje vial segun la "
+    "Ley Nacional de Transito de Argentina (Ley 24.449). Genera un dilema "
+    "vial extremo y complejo para un conductor adulto experimentado. "
+    "REGLAS CRITICAS DE CALIDAD: 1. PROHIBIDAS las opciones absurdas o de "
+    "sentido comun evidente (nada de 'chocar vs frenar', 'mirar el "
+    "celular', 'pasar por el cordon'). 2. Ambas opciones (A y B) deben "
+    "parecer correctas, logicas y ser maniobras que conductores "
+    "experimentados realizan habitualmente. 3. Solo UNA opcion es "
+    "reglamentaria y tecnicamente valida segun la normativa o la fisica "
+    "del frenado. 4. Temas a cubrir aleatoriamente: prioridad de la "
+    "derecha en cruces con avenidas no semaforizadas (Art. 41); salida de "
+    "carril interior en rotondas multicarril; uso de balizas "
+    "reglamentarias en frenadas de emergencia en autopista/rutas vs "
+    "desaceleracion; operacion ABS en piso mojado (presion continua vs "
+    "bombeo de freno); adelantamiento a transporte pesado con semirremolque "
+    "y senas de giro (guino izquierdo indica peligro, guino derecho "
+    "habilita paso); pendientes estrechas y retroceso de vehiculos segun "
+    "porte y sentido de circulacion. 5. Devuelve UNICAMENTE un JSON con: "
+    "escenario, opcion_a, opcion_b, correcta ('A'|'B'), "
+    "fundamento_tecnico (explicacion del articulo o principio fisico).")
+
+
+def _dilema_ia(usados=()):
+    """Genera un dilema tecnico con Gemini. None si falla.
+
+    Camino principal: SDK google-generativeai (gemini-1.5-flash,
+    temperature 0.9 para variedad total). Respaldo: REST directo.
+    """
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        import google.generativeai as genai  # type: ignore
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = (
+            "Genera un dilema técnico vial real y difícil según la Ley "
+            "Nacional 24.449 de Argentina. Las dos opciones deben parecer "
+            "correctas a un conductor común pero solo una se ajusta a la "
+            "normativa técnica. Responde ÚNICAMENTE un JSON con: "
+            '{"escenario": "...", "opcion_a": "...", "opcion_b": "...", '
+            '"correcta": "A", "fundamento_tecnico": "..."}')
+        response = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.9,
+                               "max_output_tokens": 700})
+        clean_text = (response.text.replace("```json", "")
+                      .replace("```", "").strip())
+        d = json.loads(clean_text)
+        if (isinstance(d, dict) and d.get("escenario")
+                and d.get("opcion_a") and d.get("opcion_b")):
+            return d
+    except Exception:
+        import traceback
+        traceback.print_exc()  # diagnostico exacto en consola
+    for modelo in GEMINI_MODELOS:
+        try:
+            r = requests.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{modelo}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "system_instruction": {
+                        "parts": [{"text": _DILEMA_IA_SISTEMA}]},
+                    "contents": [{"role": "user", "parts": [{"text":
+                        "Genera el dilema vial tecnico en JSON."}]}],
+                    "generationConfig": {
+                        "maxOutputTokens": 700, "temperature": 0.85,
+                        "thinkingConfig": {"thinkingBudget": 0}},
+                },
+                timeout=25)
+            if r.status_code != 200:
+                continue
+            texto = "".join(
+                p.get("text", "")
+                for c in r.json().get("candidates", [])
+                for p in c.get("content", {}).get("parts", []))
+            texto_raw = texto.strip()
+            texto_raw = re.sub(r"^```json\s*", "", texto_raw,
+                               flags=re.MULTILINE)
+            texto_raw = re.sub(r"```$", "", texto_raw,
+                               flags=re.MULTILINE).strip()
+            limpio = re.sub(r"^```\s*", "", texto_raw,
+                            flags=re.MULTILINE).strip()
+            d = json.loads(limpio)
+            if (isinstance(d, dict) and d.get("escenario")
+                    and d.get("opcion_a") and d.get("opcion_b")):
+                return d
+        except Exception:
+            continue
+    return None
+
+
+def _dilema_a_tarjeta(raw):
+    """Normaliza el JSON de Gemini al shape del juego."""
+    correcta_a = str(raw.get("correcta", "")).strip().upper() == "A"
+    fund = str(raw.get("fundamento_tecnico", "")).strip()
+    return {
+        "id": f"IA-{random.randint(1000, 99999)}",
+        "titulo": "Dilema técnico generado por IA",
+        "lugar": "Peritaje vial · Ley 24.449",
+        # Claves crudas del contrato IA + shape del juego.
+        "escenario": str(raw.get("escenario", "")).strip(),
+        "opcion_a": str(raw.get("opcion_a", "")).strip(),
+        "opcion_b": str(raw.get("opcion_b", "")).strip(),
+        "correcta": str(raw.get("correcta", "")).strip().upper(),
+        "situacion": str(raw.get("escenario", "")).strip(),
+        "dificultad": 3,
+        "opciones": [
+            {"texto": str(raw.get("opcion_a", "")).strip(),
+             "correcta": correcta_a, "es_correcta": correcta_a,
+             "explicacion": fund, "comentario": fund},
+            {"texto": str(raw.get("opcion_b", "")).strip(),
+             "correcta": not correcta_a, "es_correcta": not correcta_a,
+             "explicacion": fund, "comentario": fund},
+        ],
+        "explicacion": fund, "stats": {}, "fuente": "ia",
+    }
+
+
+# Banco de reserva TECNICO (Ley 24.449): solo se usa si Gemini esta
+# caido o sin cuota. El juego jamas devuelve 500 ni "Gemini no
+# respondio" al usuario.
+_DILEMAS_RESERVA = [
+    {"escenario": "Vas a ingresar a una rotonda y otro auto ya circula "
+     "por el anillo giratorio. ¿Quién pasa primero?",
+     "opcion_a": "Vos, por prioridad reglamentaria de la derecha.",
+     "opcion_b": "El que ya circula dentro del anillo giratorio.",
+     "correcta": "B",
+     "fundamento_tecnico": "Art. 43 Ley 24.449: en rotondas el circulante "
+     "dentro del anillo tiene prioridad sobre el que ingresa."},
+    {"escenario": "Vas en auto por avenida y adelante va un ciclista. "
+     "¿Cómo lo sobrepasás en forma segura y reglamentaria?",
+     "opcion_a": "Tocás bocina corta y lo rebasás con 0,5 m en el mismo "
+     "carril.",
+     "opcion_b": "Cambiás de carril dejando margen lateral mínimo de "
+     "1,5 m, sin bocina sorpresiva.",
+     "correcta": "B",
+     "fundamento_tecnico": "Art. 42 bis Ley 24.449: adelantamiento a "
+     "ciclistas exige distancia lateral mínima de 1,5 metros."},
+    {"escenario": "Con lluvia fuerte sentís que la dirección 'flota' y "
+     "el auto pierde contacto con el asfalto (aquaplaning). ¿Qué "
+     "maniobra corresponde?",
+     "opcion_a": "Clavar el freno a fondo para detener el vehículo "
+     "antes de perder la trayectoria.",
+     "opcion_b": "Soltar suavemente el acelerador, sin frenar brusco ni "
+     "girar el volante, hasta recuperar adherencia.",
+     "correcta": "B",
+     "fundamento_tecnico": "En hidroplaneo, frenar bloquea las ruedas "
+     "sobre la película de agua y agrava la pérdida de control; la "
+     "desaceleración progresiva recupera el grip."},
+    {"escenario": "Llegás a un cruce de avenidas sin semáforo y otro "
+     "vehículo se aproxima por tu derecha. ¿Quién tiene prioridad?",
+     "opcion_a": "El que va por la avenida de mayor porte, "
+     "independientemente del lado.",
+     "opcion_b": "El vehículo que viene por la derecha (Art. 41 "
+     "Ley 24.449).",
+     "correcta": "B",
+     "fundamento_tecnico": "Art. 41 Ley 24.449: sin señalización la "
+     "prioridad es siempre del que viene por la derecha."},
+    {"escenario": "En una calle angosta con fuerte pendiente donde no "
+     "entran dos vehículos, te encontrás de frente con otro. ¿Quién "
+     "retrocede?",
+     "opcion_a": "El que sube, porque tiene mejor visibilidad.",
+     "opcion_b": "El que desciende, salvo que lleve acoplado.",
+     "correcta": "B",
+     "fundamento_tecnico": "En pendientes el vehículo descendente debe "
+     "retroceder porque puede controlar la reversa con el freno; el "
+     "ascendente perdería tracción."},
+]
+
+
+@app.post("/api/generar-dilema-ia")
+def api_generar_dilema_ia():
+    """Dilema vial tecnico generado por IA en tiempo real.
+
+    Si Gemini demora o falla por cuota/red se devuelve un dilema
+    tecnico de reserva: NUNCA un 500 ni 'Gemini no respondio'.
+    """
+    payload = request.get_json(silent=True) or {}
+    usados = {str(u) for u in (payload.get("usados") or [])}
+    try:
+        raw = _dilema_ia(usados) or _dilema_ia(usados)  # reintento
+    except Exception:
+        raw = None
+    if raw:
+        d = _dilema_a_tarjeta(raw)
+    else:
+        banco = [r for r in _DILEMAS_RESERVA
+                 if r["escenario"][:40] not in usados] or _DILEMAS_RESERVA
+        d = _dilema_a_tarjeta(random.choice(banco))
+        d["fuente"] = "reserva"
+    return jsonify({"status": "ok", "dilema": d})
+
+
+@app.post("/api/desafio-decision")
+def api_desafio_decision():
+    """Dilema vial tecnico en modo supervivencia infinito.
+
+    modo=UNIVERSAL mezcla todos los bancos por vehiculo + el banco
+    tecnico (Ley 24.449, fisica vial, zonas ciegas). Cuando el banco se
+    agota intenta generar uno nuevo con IA; si no hay IA reinicia el
+    ciclo — nunca devuelve 'agotado': la partida solo termina al
+    perder las 3 vidas.
+    """
+    payload = request.get_json(silent=True) or {}
+    modo = normalizar(payload.get("modo"))
+    if modo == "BICI":
+        modo = "BICICLETA"
+
+    edad_raw = payload.get("edad")
+    try:
+        edad = (min(max(int(edad_raw), 10), 95)
+                if edad_raw is not None else None)
+    except (TypeError, ValueError):
+        edad = None
+    usados = payload.get("usados") or []
+    try:
+        nivel = min(max(int(payload.get("nivel") or 1), 1), 3)
+    except (TypeError, ValueError):
+        nivel = 1
+
+    # Pool: UNIVERSAL mezcla todos los modos + el banco tecnico.
+    if modo == "UNIVERSAL" or modo not in SITUACIONES:
+        pool = (
+            [(f"{m}-{i}", s.get("modo") or m, s)
+             for m, banco in SITUACIONES.items()
+             for i, s in enumerate(banco)]
+            + [(f"U-{i}", s.get("modo") or "AUTO", s)
+               for i, s in enumerate(SITUACIONES_UNIVERSALES)])
+    else:
+        pool = [(f"{modo}-{i}", modo, s)
+                for i, s in enumerate(SITUACIONES[modo])]
+    disponibles = [x for x in pool if x[0] not in usados]
+
+    if not disponibles:
+        if GEMINI_API_KEY:
+            gen = _desafio_gemini(usados, nivel)
+            if gen:
+                modo_g = (normalizar(gen.get("modo"))
+                          if normalizar(gen.get("modo"))
+                          in MODOS_VALIDOS else "AUTO")
+                return jsonify({
+                    "titulo": str(gen.get("titulo") or "Dilema vial"),
+                    "lugar": str(gen.get("lugar") or "Corredor jujeño"),
+                    "situacion": str(gen["situacion"]),
+                    "dificultad": nivel,
+                    "modo": modo_g,
+                    "opciones": [
+                        {"texto": str(o.get("texto") or ""),
+                         "segura": bool(o.get("segura")),
+                         "impacto": str(o.get("impacto") or ""),
+                         "explicacion": str(o.get("explicacion") or "")}
+                        for o in gen["opciones"]
+                    ],
+                    "id": f"g-{random.randrange(10**6)}",
+                    "stats": _stats_dilema(modo_g, edad, gen),
+                    "fuente": "gemini",
+                })
+        disponibles = pool  # sin IA: reinicia el ciclo (modo infinito)
+
+    # Racha alta -> dilemas de mayor dificultad tecnica; degrada si agota.
+    ideal = [x for x in disponibles if x[2].get("dificultad", 1) == nivel]
+    candidatos = (ideal
+                  or [x for x in disponibles
+                      if x[2].get("dificultad", 1) <= nivel]
+                  or disponibles)
+    sid, modo_real, sit = random.choice(candidatos)
 
     return jsonify({
         **sit,
-        "id": f"{modo}-{i}",
-        "stats": stats,
+        "id": sid,
+        "stats": _stats_dilema(modo_real, edad, sit),
     })
 
 
@@ -1888,12 +2986,18 @@ RADAR_CENTROS = {
     "PERICO": (-24.377, -65.117, 13.8),
     "EL CARMEN": (-24.388, -65.259, 13.3),
     "MONTERRICO": (-24.438, -65.161, 13.8),
+    "PALPALA": (-24.256, -65.212, 13.6),
+    "SAN PEDRO DE JUJUY": (-24.233, -64.866, 13.6),
     "SAN SALVADOR DE JUJUY": (-24.185, -65.299, 12.6),
     "TODO JUJUY": (-24.335, -65.195, 11.4),
+    # Corredor interurbano RN 66 / RN 9 / RP 42 / RP 47
+    "RUTAS": (-24.29, -65.19, 11.6),
 }
 RADAR_RADIO_KM = {
-    "PERICO": 5.0, "EL CARMEN": 6.0, "MONTERRICO": 5.0,
+    "PERICO": 5.0, "EL CARMEN": 6.0, "MONTERRICO": 5.0, "PALPALA": 5.0,
+    "SAN PEDRO DE JUJUY": 5.0,
     "SAN SALVADOR DE JUJUY": 10.0, "TODO JUJUY": 65.0,
+    "RUTAS": 65.0,
 }
 VIAS_PRINCIPALES = {
     "motorway", "motorway_link", "trunk", "trunk_link", "primary",
@@ -1917,7 +3021,12 @@ def _subset_radar(jurisdiccion, dia, hora):
     radio = RADAR_RADIO_KM[jurisdiccion]
     rows = []
     for s in SINIESTROS:
-        if jurisdiccion != "TODO JUJUY":
+        if jurisdiccion == "RUTAS":
+            # Solo incidentes sobre corredores viales provinciales o
+            # nacionales (RN/RP/accesos/empalmes), en toda la region.
+            if not _es_siniestro_ruta(s):
+                continue
+        elif jurisdiccion != "TODO JUJUY":
             if jur_ok and s["_jur"] != jurisdiccion:
                 continue
             if not jur_ok and _haversine_km(
@@ -2029,13 +3138,25 @@ def _red_ssj():
     return _RED_SSJ
 
 
+_RE_REF_RUTA = re.compile(r"^(RN|RP|RUTA)\s*\d", re.IGNORECASE)
+
+
+def _es_via_ruta(props):
+    """Feature de la red vial que pertenece a un corredor provincial o
+    nacional: ref RN*/RP* o nombre con RUTA/ACCESO/EMPALME."""
+    ref = normalizar(props.get("ref") or "")
+    nombre = normalizar(props.get("name") or "")
+    return (bool(_RE_REF_RUTA.match(ref))
+            or bool(re.search(r"\b(RUTA|ACCESO|EMPALME)\b", nombre)))
+
+
 def _vias_radar_geojson(jurisdiccion):
     """Vias principales del area como FeatureCollection (tramos fluidos)."""
     centro = RADAR_CENTROS[jurisdiccion]
     radio = RADAR_RADIO_KM[jurisdiccion]
     if jurisdiccion == "SAN SALVADOR DE JUJUY":
         red = _red_ssj()          # el geojson local no cubre la capital
-    elif jurisdiccion == "TODO JUJUY":
+    elif jurisdiccion in ("TODO JUJUY", "RUTAS"):
         red = RED_VIAL + _red_ssj()
     else:
         red = RED_VIAL
@@ -2045,8 +3166,10 @@ def _vias_radar_geojson(jurisdiccion):
         hw = props.get("highway")
         if hw not in VIAS_PRINCIPALES:
             continue
+        if jurisdiccion == "RUTAS" and not _es_via_ruta(props):
+            continue  # solo corredores viales provinciales/nacionales
         coords = f["geometry"]["coordinates"]
-        if jurisdiccion != "TODO JUJUY" and not any(
+        if jurisdiccion not in ("TODO JUJUY", "RUTAS") and not any(
                 _haversine_km(lat, lon, centro[0], centro[1]) <= radio
                 for lon, lat in coords):
             continue
@@ -2075,6 +3198,10 @@ def api_pronostico_radar():
     jur = normalizar(payload.get("jurisdiccion") or "PERICO")
     if jur == "SAN SALVADOR":
         jur = "SAN SALVADOR DE JUJUY"
+    if jur in ("TODOS", "TODAS", "TODA LA REGION", "JUJUY"):
+        jur = "TODO JUJUY"
+    if jur in ("SOLO RUTAS", "RUTAS Y ACCESOS"):
+        jur = "RUTAS"
     if jur not in RADAR_CENTROS:
         jur = "PERICO"
 
@@ -2200,6 +3327,14 @@ def _norm_ciudad(valor):
         return "Monterrico"
     if "CARMEN" in n:
         return "El Carmen"
+    if "PALPALA" in n:
+        return "Palpalá"
+    if "SAN PEDRO" in n:
+        return "San Pedro de Jujuy"
+    # Quebrada de Humahuaca y otras zonas fuera de la region Valles.
+    if re.search(r"\b(MAIMARA|TILCARA|HUMAHUACA|PURMAMARCA|SUSQUES|"
+                 r"TUMBAYA|VOLCAN|QUEBRADA)\b", n):
+        return "Otra"
     if "SAN SALVADOR" in n or "SAN SALVADOR DE JUJUY" in n or n == "JUJUY":
         return "San Salvador de Jujuy"
     return None
@@ -2334,17 +3469,40 @@ def _extraer_noticia_reglas(texto):
 
 def _extraer_noticia_gemini(texto):
     """Pide a Gemini la extraccion JSON estricta. None si falla."""
-    sistema = (
-        "Sos un extractor estructurado de cronicas policiales de Jujuy, "
-        "Argentina, sobre siniestros viales. Respondé SOLO con un objeto "
-        "JSON valido, sin markdown ni texto extra, con estas claves "
-        "exactas: fecha_aprox (dd/mm/aaaa o null), hora_aprox (HH:MM o "
-        "null), ciudad (Perico | Monterrico | El Carmen | San Salvador de "
-        "Jujuy | otra), calle_1, calle_2 (la via que cruza, si figura), "
+    # Etapa 1 previa: la jurisdiccion determinista se inyecta al prompt
+    # para que la IA no invente la localidad del hecho.
+    jur_firme = clasificar_jurisdiccion(texto)
+    pista = (" JURISDICCION YA DETERMINADA POR CLASIFICADOR: "
+             f"'{jur_firme}'. Usala tal cual en 'jurisdiccion'."
+             if jur_firme and jur_firme != "OTRA" else "")
+    sistema = pista + (
+        "Sos un extractor geoespacial estricto de cronicas policiales de "
+        "Jujuy, Argentina, sobre siniestros viales. Respondé SOLO con un "
+        "objeto JSON valido, sin markdown ni texto extra. REGLAS "
+        "INQUEBRANTABLES: 1) arteria_principal: SOLO el nombre formal y "
+        "limpio de la via ('Avenida Brasil', 'Ruta 9', 'RP 42', 'Av. "
+        "Belgrano'). NUNCA incluyas verbos ni texto del relato. 2) "
+        "arteria_secundaria: SOLO si es una calle real transversal que "
+        "corta a la principal; si la nota NO menciona una segunda calle "
+        "explicita, devolve null. PROHIBIDO extraer fragmentos de "
+        "oraciones como calles (ej. 'Pasajero a otro hombre', 'El "
+        "conductor no pudo', 'Conecta las ciudades'). 3) jurisdiccion: "
+        "exactamente una de ['Perico', 'Monterrico', 'El Carmen', "
+        "'Palpala', 'San Pedro de Jujuy', 'San Salvador de Jujuy', "
+        "'Otra'] — la localidad REAL "
+        "del hecho; si ocurrio en Ruta 52 (Purmamarca/Susques/Puna) "
+        "marca 'Otra' para no contaminar El Carmen o los Valles. 4) "
+        "referencia_paraje: barrio, paraje o hito (ej. 'El Ceibal', 'San "
+        "Antonio', '12 de Octubre', o null). Claves restantes: "
+        "fecha_aprox (dd/mm/aaaa o null), hora_aprox (HH:MM o null), "
+        "ciudad_exacta (localidad textual del texto), "
+        "calle_principal y calle_secundaria (alias de arteria_* por "
+        "compatibilidad), "
+        "vehiculos_involucrados (lista breve), "
         "modo_desplazamiento_victima (MOTO | AUTO | CAMIONETA | BICICLETA | "
         "PEATON | COLECTIVO | CAMION), contraparte_siniestro (AUTO | MOTO | "
         "CAMIONETA | CAMION | COLECTIVO | BICICLETA | PEATON | "
-        "OBJETO FIJO / COLUMNA | NINGUNO), gravedad_siniestro (LEVE | "
+        "OBJETO FIJO / COLUMNA | NINGUNO), gravedad (LEVE | "
         "GRAVE | SOLO DAÑOS), edad_victima (entero o null), resumen (una "
         "oracion). CATALOGO DE VIAS JUJENAS CONOCIDAS (reconocerlas con "
         "o sin prefijo de via): Canónigo Gorriti, Avenida 19 de Abril, "
@@ -2355,22 +3513,121 @@ def _extraer_noticia_gemini(texto):
         "Provincial 43, Ruta Provincial 47, Acceso Dique La Ciénaga. Si "
         "el texto menciona \"Canónigo Gorriti\" o cualquier otra calle o "
         "ruta local del catálogo (o verificable como arteria jujeña), "
-        "extraela en calle_1 con su nombre propio completo; NO marques "
-        "\"Ubicación no detectada\" ni \"NO ESPECIFICADO\" mientras haya "
-        "una via local identificable. REGLA ESTRICTA: si un dato no "
-        "figura explicitamente en el texto, asigná exactamente \"NO "
-        "ESPECIFICADO\" (o null si es numerico). No inventes ni deduzcas "
-        "valores.")
+        "extraela en calle_principal con su nombre propio completo; NO "
+        "marques \"Ubicación no detectada\" ni \"NO ESPECIFICADO\" "
+        "mientras haya una via local identificable. REGLA ESTRICTA: si "
+        "un dato no figura explicitamente en el texto, asigná exactamente "
+        "\"NO ESPECIFICADO\" (o null si es numerico). No inventes ni "
+        "deduzcas valores. Claves adicionales OBLIGATORIAS: "
+        "esquina_exacta, jurisdiccion_confirmada ('Perico' | 'San "
+        "Pedro de Jujuy' | 'San Salvador de Jujuy' | 'El Carmen' | "
+        "'Monterrico' | 'Palpala' | 'Otra') y "
+        "coordenadas_validas (booleano). PRECISION ESPACIAL: esquina_"
+        "exacta es la interseccion o punto kilometrico preciso del hecho "
+        "(ej. 'Gorriti y 19 de Abril', 'RN 66 km 1284'); si la esquina NO "
+        "se menciona con precision suficiente para ubicarla a menos de "
+        "50 metros, respondé exactamente 'REQUIERE_CONFIRMACION_MANUAL'. "
+        "JURISDICCION ESTRICTA: la localidad real del hecho se decide "
+        "cruzando la via detectada con las arterias oficiales de cada "
+        "jurisdiccion — la calle manda sobre la sede del medio o la "
+        "mencion generica de 'Jujuy'. ANCLAJES: Avenida Savio, Canónigo "
+        "Gorriti, Avenida Fascio, Avenida 19 de Abril, Alvear, Balbín, "
+        "Alberdi, Güemes, Senador Pérez y los barrios General Arias, "
+        "Martiarena, Bajo La Viña, Alto Comedero, Ciudad de Nieva, "
+        "Mariano Moreno, Lozano, Chijra y 13 de Octubre pertenecen a "
+        "San Salvador de Jujuy; Avenida Belgrano, Avenida Éxodo, Leandro "
+        "N. Alem, Avenida José Hernández, El Bananal y la Terminal de "
+        "Ómnibus a Perico; Avenida Centenario, Empalme RN 9 y Acceso "
+        "Dique La Ciénaga a El Carmen; el corredor RP 42/RP 43 y zona "
+        "El Labrador a Monterrico. coordenadas_validas: true SOLO si la "
+        "via detectada permite ubicar el punto con certeza espacial "
+        "dentro de la jurisdiccion_confirmada; ante duda razonable "
+        "asigná false. PROHIBIDO inventar coordenadas por defecto o "
+        "hacer fallback a avenidas de Perico si el choque ocurrio en "
+        "otra ciudad.")
     bruto = _preguntar_gemini(
-        texto[:1400], sistema=sistema, max_tokens=600, temperatura=0.1)
+        texto[:4500], sistema=sistema, max_tokens=600, temperatura=0.1)
     limpio = re.sub(r"^```(?:json)?|```$", "", bruto.strip(),
                     flags=re.M).strip()
     datos = json.loads(limpio)
     return datos if isinstance(datos, dict) else None
 
 
+def _dato(datos, *claves):
+    """Primer valor no vacio entre las claves alias (nuevas y viejas)."""
+    for c in claves:
+        v = datos.get(c)
+        if v is not None and str(v).strip():
+            return v
+    return ""
+
+
+# Sanitizador post-IA: palabras que demuestran que la "calle" extraida es
+# en realidad un fragmento del relato ("Pasajero a otro hombre",
+# "Conecta las ciudades"), no una via real.
+_PROHIBIDAS_ARTERIA = {
+    "CONDUCTOR", "PASAJERO", "HOMBRE", "MUJER", "EMBISTIO", "EVITAR",
+    "CONECTA", "TERMINARON", "HOSPITAL", "TRAS", "CHOQUE", "CERCANIAS",
+    "HACIA", "ENTRE",
+}
+
+
+def _sanear_arteria(calle, original=""):
+    """'' si la cadena no es un nombre de via valido; la calle si lo es."""
+    n = normalizar(calle or "")
+    if not n or "NO ESPECIFICADO" in n:
+        return ""
+    toks = n.split()
+    if any(t in _PROHIBIDAS_ARTERIA for t in toks):
+        return ""
+    # Mas de 3 palabras sin ser nombre propio -> fragmento de oracion.
+    # (reglas emite TODO EN MAYUSCULAS: no es nombre propio pero es via
+    # legitima — solo se descarta texto mixto que no es Title Case).
+    s = str(original).strip()
+    if len(toks) > 3 and not s.isupper() and s != s.title():
+        return ""
+    # Cola geografica del extractor regex: 'AV. MARTIJENA EN PALPALA'
+    # -> 'AVENIDA MARTIJENA' (la ciudad va aparte).
+    n = re.sub(r"\s+EN\s+(?:LA\s+|EL\s+|LOS\s+|LAS\s+)?"
+               r"[A-ZÑ]{3,}(?:\s+[A-ZÑ]{3,})*\s*$", "", n).strip()
+    # Ruido de medios y menciones de ciudad pegadas al nombre de via.
+    n = re.sub(
+        r"\s*(?:EN\s+)?(?:SAN PEDRO(?:\s+DE\s+JUJUY)?|PERICO|EL CARMEN|"
+        r"MONTERRICO|JUJUY)\s*$", "", n)
+    n = re.sub(r"\s*(?:RUTA\s+PROVINCIAL\s+)?EL\s+TRIBUNO(?:\s+DE\s+JUJUY)?",
+               "", n)
+    n = re.sub(r"\s*(?:SOMOS\s+JUJUY|JUJUY\s+AL\s+DIA|TODO\s+JUJUY|"
+               r"SINIESTRO\s+VIAL|VUELCO|CHOQUE)\s*$", "", n)
+    # Canon de rutas: 'RUTAS PROVINCIALES 1' -> 'RP 1', 'RUTA NACIONAL 9'
+    # -> 'RN 9'.
+    n = re.sub(r"^(?:RUTAS?|RUTA)\s+PROVINCIAL(?:ES)?\s*\.?\s*(\d+)$",
+               r"RP \1", n)
+    n = re.sub(r"^(?:RUTAS?|RUTA)\s+NACIONAL(?:ES)?\s*\.?\s*(\d+)$",
+               r"RN \1", n)
+    n = " ".join(n.split())
+    # Solo quedo el tipo de via (sin nombre) -> no es una arteria.
+    if n and not limpiar_calle(n):
+        return ""
+    return n
+
+
+def _norm_jurisdiccion_valor(valor):
+    """'Palpala'/'palpalá'/'EL CARMEN'/'Rutas' -> canonico del selector."""
+    n = normalizar(valor or "")
+    if n == "OTRA":
+        return "Otra"
+    if n in ("RUTAS", "RUTA", "CORREDOR VIAL"):
+        return "Rutas"
+    return _norm_ciudad(n)
+
+
 def _canon_noticia(datos):
-    """Normaliza la salida (Gemini o reglas) a los campos canonicos."""
+    """Normaliza la salida (Gemini o reglas) a los campos canonicos.
+
+    Acepta las claves del prompt estricto (calle_principal, ciudad_exacta,
+    gravedad) y las historicas (calle_1, ciudad, gravedad_siniestro).
+    Si la IA marca REQUIERE_CONFIRMACION_MANUAL, la esquina queda como
+    imprecisa y jamas se inventan coordenadas."""
     ext = {}
     ext["fecha_aprox"] = "NO ESPECIFICADO"
     f = _fecha_de_texto(str(datos.get("fecha_aprox") or ""))
@@ -2378,21 +3635,30 @@ def _canon_noticia(datos):
         ext["fecha_aprox"] = f.isoformat()
     ext["hora_aprox"] = _hora_de_texto(
         str(datos.get("hora_aprox") or "")) or "NO ESPECIFICADO"
-    ext["ciudad"] = _norm_ciudad(datos.get("ciudad")) or "NO ESPECIFICADO"
-    for c in ("calle_1", "calle_2"):
-        v = str(datos.get(c) or "").strip()
-        ext[c] = (" ".join(v.upper().split())
-                  if v and normalizar(v) not in ("NO ESPECIFICADO",)
-                  and "NO ESPECIFICADO" not in normalizar(v)
-                  else "NO ESPECIFICADO")
+    ext["ciudad"] = (_norm_ciudad(_dato(datos, "ciudad_exacta", "ciudad"))
+                     or "NO ESPECIFICADO")
+    for c, alias in (("calle_1", ("arteria_principal", "calle_principal",
+                                  "calle_1")),
+                     ("calle_2", ("arteria_secundaria", "calle_secundaria",
+                                  "calle_2"))):
+        v = str(_dato(datos, *alias)).strip()
+        # Sanitizador post-IA: fragmentos del relato no son arterias.
+        v = _sanear_arteria(v, v)
+        ext[c] = v if v else "NO ESPECIFICADO"
+    # Desduplicacion: 'Avenidas Brasil y Avenidas Brasil' -> una sola.
+    if (ext["calle_2"] != "NO ESPECIFICADO"
+            and limpiar_calle(ext["calle_2"]) == limpiar_calle(ext["calle_1"])):
+        ext["calle_2"] = "NO ESPECIFICADO"
     ext["modo_desplazamiento_victima"] = (
         _norm_modo(datos.get("modo_desplazamiento_victima"))
+        or _modo_en_texto(normalizar(
+            str(datos.get("vehiculos_involucrados") or "")))
         or "NO ESPECIFICADO")
     ext["contraparte_siniestro"] = (
         _norm_contraparte(datos.get("contraparte_siniestro"))
         or "NO ESPECIFICADO")
     ext["gravedad_siniestro"] = (
-        _norm_gravedad(datos.get("gravedad_siniestro"))
+        _norm_gravedad(_dato(datos, "gravedad", "gravedad_siniestro"))
         or "NO ESPECIFICADO")
     try:
         e = int(datos.get("edad_victima"))
@@ -2403,29 +3669,292 @@ def _canon_noticia(datos):
     ext["resumen"] = (res[:400]
                       if res and "NO ESPECIFICADO" not in normalizar(res)
                       else "NO ESPECIFICADO")
+    # Jurisdiccion estricta declarada por la IA (o derivada de ciudad/calle).
+    jc = _norm_jurisdiccion_valor(
+        _dato(datos, "jurisdiccion", "jurisdiccion_confirmada"))
+    ext["jurisdiccion_confirmada"] = jc or "NO ESPECIFICADO"
+    # Referencia territorial auxiliar (barrio/paraje/hito citado en la nota).
+    ext["referencia_paraje"] = (
+        " ".join(str(_dato(datos, "referencia_paraje")).split())
+        or "NO ESPECIFICADO")
+    # Esquina imprecisa: la IA pidio confirmacion manual -> prohibido
+    # georreferenciar de oficio; el punto lo marca el usuario en el mapa.
+    marcas = " ".join(str(_dato(datos, "esquina_exacta", "esquina",
+                              "calle_principal", "calle_1",
+                              "calle_secundaria", "calle_2")))
+    ext["esquina_imprecisa"] = "REQUIERE_CONFIRMACION_MANUAL" in normalizar(
+        marcas)
+    cv = datos.get("coordenadas_validas")
+    ext["coordenadas_validas"] = (
+        False if ext["esquina_imprecisa"]
+        else (cv if isinstance(cv, bool) else None))
     return ext
 
 
-def _geocodificar_noticia(ciudad, calle_1, calle_2, usar_nominatim=True):
-    """Estima lat/lon cruzando calles con la red vial local (y Nominatim)."""
+# Arterias inconfundibles por jurisdiccion: un "Belgrano" o "San Martin"
+# existe en todos los pueblos, pero Savio o Gorriti solo estan en la
+# capital. La calle detectada define la localidad real del hecho.
+VIAS_POR_JURISDICCION = {
+    "SAN SALVADOR DE JUJUY": (
+        "SAVIO", "GORRITI", "CANONIGO", "FASCIO", "19 DE ABRIL",
+        "ALVEAR", "BALBIN", "ALBERDI", "GUEMES", "SENADOR PEREZ",
+        "NECOCHEA", "CAFRUNE",
+    ),
+    "PERICO": (
+        "JOSE HERNANDEZ", "LEANDRO N ALEM", "LEANDRO ALEM",
+        "TERMINAL DE OMNIBUS", "ROTONDA BELGRANO",
+    ),
+    "EL CARMEN": (
+        "DIQUE LA CIENAGA", "LA CIENAGA", "EMPALME",
+    ),
+    "MONTERRICO": (
+        "EL LABRADOR", "ACCESO SAN ANTONIO",
+    ),
+    "PALPALA": (
+        "MARTIJENA", "RIO DE LA PLATA", "CATALANO",
+        "JUAN JOSE PASO", "AVENIDA LIBERTAD",
+    ),
+    "SAN PEDRO DE JUJUY": (
+        "BRASIL", "SIRIA", "GOLETA", "PROLONGACION",
+    ),
+}
+
+
+def _jurisdiccion_por_calle(calle):
+    """Jurisdiccion deducida de una arteria inconfundible, o ''."""
+    n = normalizar(calle or "")
+    if not n:
+        return ""
+    for jur, claves in VIAS_POR_JURISDICCION.items():
+        if any(re.search(rf"\b{re.escape(k)}\b", n) for k in claves):
+            return jur
+    return ""
+
+
+# Barrios y zonas inconfundibles por jurisdiccion: el cronista suele citar
+# el barrio antes que la calle. Un hecho en "Martiarena" es de San
+# Salvador aunque el filtro activo diga Perico.
+BARRIOS_POR_JURISDICCION = {
+    "SAN SALVADOR DE JUJUY": (
+        "GENERAL ARIAS", "GRAL ARIAS", "MARTIARENA", "BAJO LA VINA",
+        "ALTO COMEDERO", "CIUDAD DE NIEVA", "MARIANO MORENO",
+        "LOZANO", "CHIJRA", "13 DE OCTUBRE", "SAN PEDRITO", "CUYAYA",
+        "PUESTO VIEJO", "BARRIO CUYAYA", "LOTEO CUYAYA",
+        "REYES", "RIO LEON", "ARIAS", "GUAYAQUIL",
+    ),
+    "PERICO": (
+        "EL BANANAL", "BARRIO NORTE", "TERMINAL DE OMNIBUS",
+    ),
+    "EL CARMEN": (
+        "PAMPAS BLANCAS", "EL QUIMILAR",
+    ),
+    "MONTERRICO": (
+        "EL LABRADOR",
+    ),
+    "PALPALA": (
+        "12 DE OCTUBRE", "EL CEIBAL", "SAN ANTONIO", "PALPALA",
+    ),
+    "SAN PEDRO DE JUJUY": (
+        "SAN PEDRO", "BARRIO CANAL", "LA POSTA",
+    ),
+    # Fuera de la region operativa: Quebrada de Humahuaca y Puna.
+    "OTRA": (
+        "RUTA 52", "MAIMARA", "TILCARA", "HUMAHUACA", "PURMAMARCA",
+        "SUSQUES", "TUMBAYA", "VOLCAN", "QUEBRADA",
+    ),
+}
+
+# ================= ETAPA 1: CLASIFICADOR TERRITORIAL =================
+# Diccionario deterministico de entidades geograficas provinciales con
+# su Bounding Box hermetico y centroide urbano de referencia.
+ENTIDADES_GEO = {
+    "SAN PEDRO DE JUJUY": {
+        "claves": ("SAN PEDRO", "LA POSTA", "INGENIO LA ESPERANZA",
+                   "BARRIO CANAL", "PATERSON"),
+        "bbox": (-64.91, -24.28, -64.82, -24.19),
+        "centro": (-24.233, -64.866),
+    },
+    "SAN SALVADOR DE JUJUY": {
+        "claves": ("SAN SALVADOR", "CAPITAL", "GORRITI", "ARIAS",
+                   "CORONEL ARIAS", "SAVIO", "MARTIARENA", "REYES",
+                   "BAJO LA VINA", "CHIJRA", "RIO LEON",
+                   "CIUDAD DE NIEVA", "GUAYAQUIL"),
+        "bbox": (-65.37, -24.25, -65.23, -24.13),
+        "centro": (-24.185, -65.299),
+    },
+    "PERICO": {
+        "claves": ("PERICO", "CIUDAD PERICO", "AEROPUERTO", "EL PONGO",
+                   "BARRIO SAN JOSE", "BARRIO OBRERO"),
+        "bbox": (-65.16, -24.42, -65.07, -24.34),
+        "centro": (-24.377, -65.117),
+    },
+    "MONTERRICO": {
+        "claves": ("MONTERRICO", "12 DE OCTUBRE", "LA OVEJERIA"),
+        "bbox": (-65.20, -24.47, -65.12, -24.40),
+        "centro": (-24.438, -65.161),
+    },
+    "EL CARMEN": {
+        "claves": ("EL CARMEN", "DIQUES", "LA CIENAGA", "LAS MADERAS",
+                   "SAN ANTONIO", "EL CEIBAL"),
+        "bbox": (-65.32, -24.43, -65.22, -24.34),
+        "centro": (-24.388, -65.258),
+    },
+    "PALPALA": {
+        "claves": ("PALPALA", "ALTOS HORNOS ZAPLA", "MARTIJENA",
+                   "RIO BLANCO"),
+        "bbox": (-65.26, -24.30, -65.17, -24.22),
+        "centro": (-24.256, -65.212),
+    },
+}
+FUERA_ZONA = (
+    "RUTA 52", "PURMAMARCA", "TILCARA", "HUMAHUACA", "LA QUIACA",
+    "SUSQUES", "LEDEZMA", "LIBERTADOR", "MAIMARA", "TUMBAYA",
+    "VOLCAN", "QUEBRADA",
+)
+
+
+def clasificar_jurisdiccion(texto):
+    """Etapa 1: clasifica el texto completo en una jurisdiccion firme.
+
+    Devuelve 'OTRA' si el hecho es fuera de la region operativa
+    (Quebrada/Puna -> descartable), la clave de la jurisdiccion con la
+    mencion territorial mas fuerte, o '' si nada determina la zona.
+    """
+    n = normalizar(texto or "")
+    if any(re.search(rf"\b{re.escape(k)}\b", n) for k in FUERA_ZONA):
+        return "OTRA"
+    mejor, mejor_score = "", 0
+    for jur, ent in ENTIDADES_GEO.items():
+        score = sum(1 for k in ent["claves"]
+                    if re.search(rf"\b{re.escape(k)}\b", n))
+        # Las claves compuestas pesan mas (mencion inconfundible).
+        if score > mejor_score:
+            mejor, mejor_score = jur, score
+    return mejor
+
+
+def _en_bbox_jur(punto, jur):
+    """Etapa 3: el punto debe caer dentro del bbox hermetico."""
+    bb = BBOX_JURISDICCION.get(jur)
+    if not bb:
+        return True
+    return (bb[1] <= punto["lat"] <= bb[3]
+            and bb[0] <= punto["lon"] <= bb[2])
+
+_RE_MARCADOR_RUTA = re.compile(
+    r"\b(RUTA|RN\s*\d+|RP\s*\d+|NACIONAL|PROVINCIAL|ACCESO|EMPALME|"
+    r"AUTOPISTA|KM\s*\d+)\b")
+
+
+def _jurisdiccion_en_texto(texto):
+    """Jurisdiccion que revela el texto crudo (barrios/vias unicas), o ''."""
+    n = normalizar(texto or "")
+    if not n:
+        return ""
+    for jur, claves in BARRIOS_POR_JURISDICCION.items():
+        if any(re.search(rf"\b{re.escape(k)}\b", n) for k in claves):
+            return jur
+    return _jurisdiccion_por_calle(texto)
+
+
+def _noticia_en_ruta(ext, texto=""):
+    """True si el hecho ocurrio sobre un corredor vial provincial o
+    nacional (RN 66, RN 9, RP 42, RP 47, accesos, empalmes)."""
+    partes = " ".join(filter(None, [
+        ext.get("calle_1") or "", ext.get("calle_2") or "", texto or ""]))
+    return bool(_RE_MARCADOR_RUTA.search(normalizar(partes)))
+
+
+def _jurisdiccion_detectada(ext):
+    """Jurisdiccion mas confiable del hecho: confirmada por IA > ciudad
+    explicita > arteria inconfundible. 'OTRA' = fuera del corredor."""
+    jc = ext.get("jurisdiccion_confirmada") or ""
+    if normalizar(jc) == "OTRA":
+        return "OTRA"
+    return (normalizar(_norm_ciudad(jc) or "")
+            or normalizar(_norm_ciudad(ext.get("ciudad")) or "")
+            or _jurisdiccion_por_calle(ext.get("calle_1"))
+            or _jurisdiccion_por_calle(ext.get("calle_2")))
+
+
+def _geo_valida(geo, ext):
+    """Certeza espacial del punto.
+
+    Exige que el geocoder haya encontrado una via real (no el centro
+    generico), que la IA no haya marcado coordenadas invalidas y que el
+    punto caiga dentro de la jurisdiccion detectada: si "Gorriti" matchea
+    en Perico pero el hecho es de San Salvador, el punto es espurio y se
+    marca invalido en vez de inventarlo."""
+    if ext.get("esquina_imprecisa"):
+        return False  # la IA pidio confirmacion manual: no inventar punto
+    if not (geo and geo.get("confianza") != "baja"
+            and ext.get("coordenadas_validas") is not False):
+        return False
+    jur = _jurisdiccion_detectada(ext)
+    if jur == "OTRA":
+        return False
+    centro = CENTROS_MUNICIPIOS.get(jur)
+    if centro and _haversine_km(geo["lat"], geo["lon"], *centro) > (
+            RADAR_RADIO_KM.get(jur, RADIO_JURISDICCION_KM)):
+        return False  # calle homonima de otro pueblo
+    return True
+
+
+def _geocodificar_noticia(ciudad, calle_1, calle_2, usar_nominatim=True,
+                          jur_detectada=""):
+    """Estima lat/lon cruzando calles con la red vial local (y Nominatim).
+
+    La jurisdiccion detectada (ciudad/calle del hecho, no la elegida en el
+    filtro) decide el contexto geografico: si la noticia es de San
+    Salvador se consulta Nominatim con esa ciudad y el fallback centra en
+    (-24.185, -65.299) — nunca se fuerza el punto a Perico.
+    """
+    jur = (jur_detectada if jur_detectada in CENTROS_MUNICIPIOS
+           else normalizar(_norm_ciudad(ciudad or "") or ""))
+    ciudad_ctx = {
+        "PERICO": "Perico", "MONTERRICO": "Monterrico",
+        "EL CARMEN": "El Carmen", "PALPALA": "Palpalá",
+        "SAN PEDRO DE JUJUY": "San Pedro de Jujuy",
+        "SAN SALVADOR DE JUJUY": "San Salvador",
+    }.get(jur, ciudad or "")
+
     consulta = (f"{calle_1} y {calle_2}" if calle_1 and calle_2
                 else calle_1 or "")
     if consulta:
-        try:
-            res = geo_buscar(consulta)
-            if res:
-                return {
-                    "lat": res[0]["lat"], "lon": res[0]["lon"],
-                    "nombre": res[0]["nombre"],
-                    "fuente": "red-vial", "confianza": "alta",
-                }
-        except Exception:
-            pass
+        # En Perico/Palpala el motor de interseccion local es el de mayor
+        # precision: limpia prefijos/titulos (limpiar_calle) y cruza las
+        # geometrias reales de las LineStrings del catalogo.
+        if jur in ("PERICO", "PALPALA", "SAN PEDRO DE JUJUY",
+                   "SAN SALVADOR DE JUJUY"):
+            try:
+                cruce = geo_cruzar(calle_1 or "", calle_2 or "", jur=jur)
+                if cruce:
+                    return cruce
+            except Exception:
+                pass
+        # En San Salvador la red vial local no tiene cobertura: Nominatim
+        # primero evita matchear calles homonimas de los Valles.
+        if jur != "SAN SALVADOR DE JUJUY":
+            try:
+                res = geo_buscar(consulta)
+                # Match local solo con confianza >= 85%: nada de resolver
+                # la esquina en otra jurisdiccion por nombre parecido.
+                if (res and res[0].get("score", 0) >= 0.85
+                        and _en_bbox_jur(res[0], jur)):
+                    return {
+                        "lat": res[0]["lat"], "lon": res[0]["lon"],
+                        "nombre": res[0]["nombre"],
+                        "fuente": "red-vial", "confianza": "alta",
+                    }
+            except Exception:
+                pass
         if usar_nominatim:
             try:
                 res = geo_nominatim(
-                    f"{consulta}, {ciudad or 'Perico'}, Jujuy, Argentina",
-                    limite=1)
+                    f"{consulta}, {ciudad_ctx}, Jujuy, Argentina",
+                    limite=1,
+                    viewbox=BBOX_JURISDICCION.get(
+                        jur, BBOX_JURISDICCION["TODOS"]))
                 if res:
                     return {
                         "lat": res[0]["lat"], "lon": res[0]["lon"],
@@ -2434,13 +3963,66 @@ def _geocodificar_noticia(ciudad, calle_1, calle_2, usar_nominatim=True):
                     }
             except requests.RequestException:
                 pass
-    jur = normalizar(ciudad or "PERICO")
-    centro = (RADAR_CENTROS.get(jur) or RADAR_CENTROS["PERICO"])
+        if jur == "SAN SALVADOR DE JUJUY":
+            try:
+                res = geo_buscar(consulta)
+                if (res and res[0].get("score", 0) >= 0.85
+                        and _en_bbox_jur(res[0], jur)):
+                    return {
+                        "lat": res[0]["lat"], "lon": res[0]["lon"],
+                        "nombre": res[0]["nombre"],
+                        "fuente": "red-vial", "confianza": "alta",
+                    }
+            except Exception:
+                pass
+    # Etapa 4 - fallback seguro: con jurisdiccion firme se asigna el
+    # centroide urbano propio; JAMAS un punto de otra jurisdiccion.
+    sugerida = " y ".join(
+        p.title() for p in (calle_1, calle_2) if p) or ciudad_ctx or ""
+    if jur in CENTROS_MUNICIPIOS:
+        lat_c, lon_c = CENTROS_MUNICIPIOS[jur]
+        return {
+            "lat": lat_c, "lon": lon_c,
+            "coordenadas": [lon_c, lat_c],
+            "calle_sugerida": sugerida,
+            "nombre": sugerida or ciudad_ctx or "Ubicación no resuelta",
+            "fuente": "centroide-jurisdiccion", "confianza": "media",
+            "coordenadas_validas": True,
+        }
     return {
-        "lat": centro[0], "lon": centro[1],
-        "nombre": ciudad or "Centro de la jurisdicción",
-        "fuente": "centro-ciudad", "confianza": "baja",
+        "lat": None, "lon": None, "coordenadas": None,
+        "calle_sugerida": sugerida,
+        "nombre": sugerida or "Ubicación no resuelta",
+        "fuente": "sin-coincidencia", "confianza": "baja",
+        "coordenadas_validas": False,
     }
+
+
+def geocodificar_noticia(calle_1, calle_2, ciudad):
+    """API publica para el Monitor de Noticias: recibe las dos arterias
+    textuales detectadas por la IA mas la ciudad, y devuelve lat/lon.
+
+    1) En Perico cruza las geometrias reales del catalogo local
+       (limpiar_calle + motor de interseccion): nunca queda vacio si la
+       IA ya detecto las dos arterias.
+    2) Si no, delega al pipeline general (red vial + Nominatim acotado
+       al bbox estricto de la jurisdiccion detectada).
+    """
+    # Sanitiza las entradas crudas (titulares con colas de medio/ciudad).
+    calle_1 = _sanear_arteria(calle_1, calle_1)
+    calle_2 = _sanear_arteria(calle_2, calle_2)
+    jur = _jurisdiccion_query(ciudad)
+    if jur in ("PERICO", "PALPALA", "SAN PEDRO DE JUJUY",
+               "SAN SALVADOR DE JUJUY"):
+        try:
+            cruce = geo_cruzar(calle_1 or "", calle_2 or "", jur=jur)
+            if cruce:
+                return cruce
+        except Exception:
+            pass
+    return _geocodificar_noticia(
+        ciudad or "", calle_1 or "", calle_2 or "",
+        usar_nominatim=True, jur_detectada=jur)
 
 
 def _duplicado_noticia(ext, geo):
@@ -2504,32 +4086,130 @@ def _html_a_texto(doc):
     return " ".join(html.unescape(t).split())
 
 
+_HEADERS_WEB = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0 Safari/537.36"),
+    "Accept-Language": "es-AR,es;q=0.9",
+}
+
+
+def _resolver_url_gnews(url):
+    """Resuelve enlaces /rss/articles/ de Google News a la URL del medio.
+
+    Google News ya no hace redirect 30x: la pagina intermedia trae una
+    firma (data-n-a-sg) y un timestamp (data-n-a-ts) que hay que mandar
+    al RPC interno 'Fbv4je' de batchexecute para recuperar la URL real.
+    """
+    if "news.google.com" not in url:
+        return url
+    try:
+        r = requests.get(url, headers=_HEADERS_WEB, timeout=15)
+        if "news.google.com" not in r.url:
+            return r.url
+        m_id = re.search(r"/articles/([A-Za-z0-9_-]+)", url)
+        m_ts = re.search(r'data-n-a-ts="(\d+)"', r.text)
+        m_sg = re.search(r'data-n-a-sg="([^"]+)"', r.text)
+        if m_id and m_ts and m_sg:
+            inner = (
+                '["garturlreq",[["es-419","AR",["WEB_TEST_1_0_0"],'
+                'null,null,1,1,"AR:es-419",null,180,null,null,null,'
+                'null,null,0,null,null,[1608992183,723341000]],'
+                '"es-419","AR",1,[2,3,4,8],1,0,"655000234",0,0,null,0]'
+                f',"{m_id.group(1)}",{m_ts.group(1)},"{m_sg.group(1)}"]')
+            payload = json.dumps([[
+                ["Fbv4je", inner, None, "generic"]]])
+            r2 = requests.post(
+                "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                data={"f.req": payload}, headers=_HEADERS_WEB,
+                timeout=15)
+            for linea in r2.text.splitlines():
+                linea = linea.strip()
+                if not linea.startswith("["):
+                    continue
+                try:
+                    arr = json.loads(linea)
+                    envoltura = json.loads(arr[0][2])
+                    destino = envoltura[1]
+                    if isinstance(destino, str) and destino.startswith("http"):
+                        return destino
+                except (json.JSONDecodeError, TypeError, IndexError,
+                        KeyError):
+                    continue
+        # Ultimo recurso: primer enlace externo a Google en la pagina.
+        m_href = re.search(
+            r'href="(https?://(?!www\.google|news\.google|accounts\.google|'
+            r'support\.google|policies\.google)[^"]+)"', r.text)
+        if m_href:
+            return html.unescape(m_href.group(1))
+    except requests.RequestException:
+        pass
+    return url
+
+
+def _extraer_cuerpo_html(doc):
+    """Texto del articulo: trafilatura/bs4 si estan, si no regex simple."""
+    try:  # trafilatura da el cuerpo limpio cuando esta instalada
+        import trafilatura
+        t = trafilatura.extract(doc, include_comments=False,
+                                include_tables=False)
+        if t and len(t) > 200:
+            return " ".join(t.split())
+    except ImportError:
+        pass
+    try:  # BeautifulSoup: <article> o la suma de parrafos largos
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(doc, "html.parser")
+        nodo = soup.find("article") or soup.find("main") or soup
+        parrafos = [p.get_text(" ", strip=True)
+                    for p in nodo.find_all("p")]
+        texto = " ".join(p for p in parrafos if len(p) > 40)
+        if len(texto) > 200:
+            return " ".join(texto.split())
+    except ImportError:
+        pass
+    return _html_a_texto(doc)
+
+
+def _descargar_cuerpo_noticia(url):
+    """Descarga el cuerpo real de la nota: resuelve el redirect de Google
+    News y extrae el articulo completo. Devuelve (texto, url_final)."""
+    url_final = _resolver_url_gnews(url)
+    r = requests.get(url_final, headers=_HEADERS_WEB, timeout=15)
+    r.raise_for_status()
+    return _extraer_cuerpo_html(r.text), url_final
+
+
 @app.post("/api/procesar-noticia")
 def api_procesar_noticia():
     """Extrae el siniestro desde una cronica periodistica y detecta duplicados.
 
-    Body JSON: {texto, url?}. Con GEMINI_API_KEY usa extraccion IA; si no,
-    regex/NLP local. Georreferencia por calle+cruce y compara contra el CSV.
+    Body JSON: {texto, url?}. Si viene URL (y no texto) descarga el cuerpo
+    REAL de la nota — resolviendo el redirect de Google News — y analiza el
+    articulo completo, no el titular truncado. Con GEMINI_API_KEY usa
+    extraccion IA; si no, regex/NLP local. Georreferencia por calle+cruce
+    dentro de la jurisdiccion detectada y compara contra el CSV.
     """
     payload = request.get_json(silent=True) or {}
     texto = str(payload.get("texto") or "").strip()
     url = str(payload.get("url") or "").strip()
+    url_final = url
+    cuerpo_completo = bool(texto)
 
-    if not texto and url:
+    if url:
         try:
-            r = requests.get(
-                url,
-                headers={"User-Agent": "mineria-valles-jujuy/1.0 "
-                                       "(trabajo academico)"},
-                timeout=15)
-            r.raise_for_status()
-            texto = _html_a_texto(r.text)
+            descargado, url_final = _descargar_cuerpo_noticia(url)
+            if len(descargado) >= 120:
+                texto = descargado
+                cuerpo_completo = True
         except requests.RequestException:
-            return jsonify({
-                "status": "error",
-                "mensaje": ("No se pudo descargar el enlace; pegá el "
-                            "texto de la noticia directamente."),
-            }), 400
+            pass
+    if not texto and url:
+        return jsonify({
+            "status": "error",
+            "mensaje": ("No se pudo descargar el cuerpo de la noticia; "
+                        "pegá el texto de la crónica directamente."),
+        }), 400
 
     if len(texto) < 60:
         return jsonify({
@@ -2553,7 +4233,9 @@ def api_procesar_noticia():
     geo = _geocodificar_noticia(
         None if ext["ciudad"] == "NO ESPECIFICADO" else ext["ciudad"],
         None if ext["calle_1"] == "NO ESPECIFICADO" else ext["calle_1"],
-        None if ext["calle_2"] == "NO ESPECIFICADO" else ext["calle_2"])
+        None if ext["calle_2"] == "NO ESPECIFICADO" else ext["calle_2"],
+        jur_detectada=_jurisdiccion_detectada(ext))
+    geo["coordenadas_validas"] = _geo_valida(geo, ext)
     dup_id = _duplicado_noticia(ext, geo)
 
     advertencia = (
@@ -2568,12 +4250,16 @@ def api_procesar_noticia():
         "es_duplicado": bool(dup_id),
         "duplicado_id": dup_id,
         "advertencia": advertencia,
+        "url_final": url_final,
+        "cuerpo_completo": cuerpo_completo,
+        "cuerpo_len": len(texto),
     })
 
 
 # ====== MONITOR DE PRENSA: escaneo automatico de Google News ======
 
 GNEWS_PERIODOS = {
+    "24H": "when:1d", "ULTIMAS 24 HORAS": "when:1d",
     "48H": "when:2d", "ULTIMAS 48 HORAS": "when:2d",
     "SEMANA": "when:7d", "ESTA SEMANA": "when:7d",
     "MES": "when:30d", "ESTE MES": "when:30d",
@@ -2625,10 +4311,25 @@ def api_buscar_noticias_google():
     when = GNEWS_PERIODOS.get(
         normalizar(request.args.get("periodo") or "SEMANA"), "when:7d")
 
+    # Filtro estricto de jurisdiccion: si la zona elegida es una localidad
+    # del corredor, se descartan noticias confirmadas en otra localidad
+    # ("Jujuy"/"Todo Jujuy"/"Toda la Region" no filtra). "RUTAS" es un
+    # ambito especial: solo incidentes sobre corredores viales.
+    zona_n = normalizar(zona)
+    solo_rutas = zona_n in ("RUTAS", "SOLO RUTAS", "RUTAS Y ACCESOS")
+    jur_filtro = ("" if solo_rutas or zona_n in (
+        "", "JUJUY", "TODO JUJUY", "TODOS", "TODA LA REGION")
+        else normalizar(_norm_ciudad(zona) or ""))
+
     # Consulta estricta de transito jujeño: exige terminos de siniestralidad
     # vial + la provincia + la zona elegida (evita notas de otros paises y
     # falsos positivos como personas apodadas "Perico").
-    q = f"(choque OR siniestro vial OR colision) Jujuy ({zona}) {when}"
+    if solo_rutas:
+        q = (f"(choque OR siniestro vial OR colision) Jujuy "
+             f"(ruta OR \"RN 66\" OR \"RN 9\" OR \"RP 42\" OR \"RP 47\") "
+             f"{when}")
+    else:
+        q = f"(choque OR siniestro vial OR colision) Jujuy ({zona}) {when}"
     try:
         r = requests.get(
             "https://news.google.com/rss/search",
@@ -2693,15 +4394,54 @@ def api_buscar_noticias_google():
         datos[:n_ia] = resultados
 
     noticias = []
+    descartadas_jur = 0
     for i, it in enumerate(items):
         ext = _canon_noticia(datos[i] or _extraer_noticia_reglas(it["texto"]))
         if ext["fecha_aprox"] == "NO ESPECIFICADO" and it["fecha_d"]:
             ext["fecha_aprox"] = it["fecha_d"].isoformat()
+        # Filtro estricto de ciudad: con jurisdiccion elegida se descarta
+        # toda noticia confirmada en otra localidad — por la via detectada
+        # o por mencion clara a un barrio ajeno (ej. eligiendo Perico se
+        # descarta lo que mencione Gorriti, Martiarena, Bajo La Vina...).
+        jur_det = _jurisdiccion_detectada(ext)
+        jur_txt = clasificar_jurisdiccion(it["texto"])
+        # San Pedro: exige mencion propia y descarta hitos de la capital.
+        if jur_filtro == "SAN PEDRO DE JUJUY":
+            nt = normalizar(it["texto"])
+            if not re.search(
+                    r"\b(SAN PEDRO|LA ESPERANZA|LA POSTA|PATERSON)\b", nt):
+                descartadas_jur += 1
+                continue
+            if re.search(
+                    r"\b(HOSPITAL SAN ROQUE|HOSPITAL PABLO SORIA|GORRITI|"
+                    r"CORONEL ARIAS|SAN SALVADOR|AVENIDA SAVIO|"
+                    r"MARTIARENA)\b", nt):
+                descartadas_jur += 1
+                continue
+        if jur_filtro and ((jur_det and jur_det != jur_filtro)
+                           or (jur_txt and jur_txt != jur_filtro)):
+            descartadas_jur += 1
+            continue
+        # "Solo Rutas": exclusivamente incidentes sobre corredores viales
+        # provinciales o nacionales (RN 66, RN 9, RP 42, RP 47, accesos).
+        if solo_rutas and not _noticia_en_ruta(ext, it["texto"]):
+            descartadas_jur += 1
+            continue
         geo = _geocodificar_noticia(
             None if ext["ciudad"] == "NO ESPECIFICADO" else ext["ciudad"],
             None if ext["calle_1"] == "NO ESPECIFICADO" else ext["calle_1"],
             None if ext["calle_2"] == "NO ESPECIFICADO" else ext["calle_2"],
-            usar_nominatim=False)
+            usar_nominatim=False,
+            jur_detectada=jur_txt or jur_det)  # el texto manda sobre la IA
+        geo["coordenadas_validas"] = _geo_valida(geo, ext)
+        # La calle manda: si el punto georreferenciado cae fuera del radio
+        # de la jurisdiccion filtrada, el hecho es de otra localidad.
+        if (jur_filtro and geo["confianza"] != "baja"
+                and _haversine_km(geo["lat"], geo["lon"],
+                                  *CENTROS_MUNICIPIOS[jur_filtro])
+                > RADAR_RADIO_KM.get(jur_filtro, RADIO_JURISDICCION_KM)):
+            descartadas_jur += 1
+            continue
         dup_id = _duplicado_noticia(ext, geo)
         noticias.append({
             "id": f"n-{i}",
@@ -2709,7 +4449,9 @@ def api_buscar_noticias_google():
             "medio": it["medio"],
             "url": it["url"],
             "fecha_pub": it["fecha_pub"],
+            "texto": it["texto"],
             "extraido": ext,
+            "jurisdiccion_detectada": jur_det or None,
             "geo": geo,
             "es_duplicado": bool(dup_id),
             "duplicado_id": dup_id,
@@ -2719,8 +4461,215 @@ def api_buscar_noticias_google():
         "status": "ok", "zona": zona, "periodo": when,
         "total": len(noticias), "noticias": noticias,
         "descartados": descartados,
+        "descartados_jurisdiccion": descartadas_jur,
+        "jurisdiccion_filtro": ("RUTAS" if solo_rutas else jur_filtro or None),
         "fuente": "gemini" if GEMINI_API_KEY else "reglas",
     })
+
+
+@app.post("/api/analizar-url")
+def api_analizar_url():
+    """Descarga server-side la nota del escaner y devuelve la extraccion.
+
+    Resuelve el redirect de Google News, descarga el HTML con UA de
+    navegador (timeout 10 s para que el boton jamas quede trabado),
+    extrae parrafos + fecha de publicacion de los metadatos y pasa todo
+    por Gemini. Si la descarga falla, procesa el titular de la tarjeta.
+    """
+    if not request.is_json:
+        return jsonify({"status": "error",
+                        "mensaje": "Body JSON requerido"}), 400
+    datos = request.get_json(silent=True) or {}
+    url = str(datos.get("url") or "").strip()
+    titulo = str(datos.get("titulo") or "").strip()
+    if not (url.lower().startswith("http://")
+            or url.lower().startswith("https://")):
+        return jsonify({"status": "error", "mensaje": "URL inválida."}), 400
+
+    cuerpo, fecha_pub, url_final = "", None, url
+    try:
+        try:
+            url = _resolver_url_gnews(url) or url
+        except Exception:
+            pass
+        r = requests.get(url, headers=_UA_DESCARGA, timeout=10)
+        r.raise_for_status()
+        url_final = r.url
+        cuerpo = _extraer_cuerpo_html(r.text)
+        fecha_pub = _extraer_fecha_html(r.text)
+    except Exception:
+        cuerpo = ""   # paywall / gnews bloqueado: cae al titular
+
+    texto_ia = (cuerpo or titulo).strip()
+    if len(texto_ia) < 40:
+        return jsonify({"status": "error",
+                        "mensaje": "No se pudo obtener contenido de la nota."}), 502
+    if fecha_pub:
+        texto_ia = (f"[Fecha de publicación del artículo: "
+                    f"{fecha_pub.isoformat()}]\n\n" + texto_ia)
+    ext = _armar_extraccion_nota(texto_ia)
+    if not ext["fecha_siniestro"] and fecha_pub:
+        ext["fecha_siniestro"] = fecha_pub.isoformat()
+    ext["fuente"] = "gemini"
+    return jsonify({"status": "ok", "extraido": ext,
+                    "url_final": url_final}), 200
+
+
+@app.get("/api/buscar-direccion")
+def api_buscar_direccion():
+    """Buscador del mapa -> Google Maps Geocoding (prioridad absoluta)."""
+    from src.geocoder import geo_google
+    q = str(request.args.get("q") or "").strip()
+    jur = str(request.args.get("jurisdiccion") or "").strip()
+    if len(q) < 2:
+        return jsonify({"status": "ZERO_RESULTS"})
+    if normalizar(jur) in ("", "TODOS", "TODA LA REGION", "JUJUY"):
+        jur = ""
+    res = geo_google(q, None, jur)
+    if res:
+        return jsonify({"status": "OK", "lat": res["lat"],
+                        "lon": res["lon"], "nombre": res["nombre"]})
+    return jsonify({"status": "ZERO_RESULTS"})
+
+
+GOOGLE_MAPS_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+
+
+@app.get("/api/places-autocomplete")
+def api_places_autocomplete():
+    """Sugerencias en vivo: Google Places Autocomplete -> fallback
+    Geocoding (ambos son Google; Places esta deshabilitada en la key)."""
+    q = str(request.args.get("q") or "").strip()
+    if len(q) < 2 or not GOOGLE_MAPS_KEY:
+        return jsonify([])
+    out = []
+    try:  # Places API (New): preferida cuando esta habilitada
+        rn = requests.post(
+            "https://places.googleapis.com/v1/places:autocomplete",
+            headers={"X-Goog-Api-Key": GOOGLE_MAPS_KEY,
+                     "Content-Type": "application/json"},
+            json={"input": q, "languageCode": "es",
+                  "includedRegionCodes": ["ar"],
+                  "locationBias": {"circle": {
+                      "center": {"latitude": -24.25,
+                                 "longitude": -65.10},
+                      "radius": 50000.0}}},
+            timeout=5).json()
+        for sug in rn.get("suggestions", []):
+            pp = sug.get("placePrediction") or {}
+            txt = (pp.get("text") or {}).get("text") or ""
+            sf = pp.get("structuredFormat") or {}
+            if pp.get("placeId") and txt:
+                out.append({
+                    "titulo": (sf.get("mainText") or {}).get("text", txt),
+                    "subtitulo": (sf.get("secondaryText") or {}).get(
+                        "text", ""),
+                    "descripcion_completa": txt,
+                    "place_id": pp["placeId"], "fuente": "Google Maps"})
+    except Exception as exc:
+        print(f"Places New: {exc}")
+    try:
+        if out:
+            raise StopIteration
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/place/autocomplete/json",
+            params={"input": q, "components": "country:ar",
+                    "locationbias": "circle:80000@-24.25,-65.10",
+                    "language": "es", "key": GOOGLE_MAPS_KEY},
+            timeout=5).json()
+        for it in r.get("predictions", []):
+            sf = it.get("structured_formatting") or {}
+            out.append({"titulo": sf.get("main_text", it.get("description")),
+                        "subtitulo": sf.get("secondary_text", ""),
+                        "descripcion_completa": it.get("description"),
+                        "place_id": it.get("place_id"),
+                        "fuente": "Google Maps"})
+    except StopIteration:
+        pass
+    except Exception as exc:
+        print(f"Error en Google Autocomplete: {exc}")
+    if not out:  # Places deshabilitada -> Geocoding como respaldo
+        try:
+            g = requests.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={"address": f"{q}, Jujuy, Argentina",
+                        "components": "country:AR",
+                        "key": GOOGLE_MAPS_KEY}, timeout=5).json()
+            for it in g.get("results", [])[:5]:
+                partes = it.get("formatted_address", "").split(",")
+                out.append({
+                    "titulo": partes[0].strip(),
+                    "subtitulo": ",".join(partes[1:]).strip(),
+                    "descripcion_completa": it.get("formatted_address", ""),
+                    "place_id": "",
+                    "lat": it["geometry"]["location"]["lat"],
+                    "lon": it["geometry"]["location"]["lng"],
+                    "fuente": "Google Maps"})
+        except Exception:
+            pass
+    return jsonify([o for o in out if o["titulo"]])
+
+
+def _geo_por_address(address):
+    """Geocoding de Google por texto libre -> dict status OK o None."""
+    if not address or not GOOGLE_MAPS_KEY:
+        return None
+    try:
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"address": address, "key": GOOGLE_MAPS_KEY},
+            timeout=5).json()
+        if r.get("status") == "OK" and r.get("results"):
+            loc = r["results"][0]["geometry"]["location"]
+            return {"status": "OK", "lat": loc["lat"], "lon": loc["lng"],
+                    "nombre": r["results"][0].get("formatted_address", "")}
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/place-coordenadas")
+@app.get("/api/place-details")
+def api_place_coordenadas():
+    """Resuelve place_id (Place Details) o address (Geocoding) a lat/lon."""
+    place_id = str(request.args.get("place_id") or "").strip()
+    address = str(request.args.get("address") or "").strip()
+    if place_id and GOOGLE_MAPS_KEY:
+        for url_places in (
+            f"https://places.googleapis.com/v1/places/{place_id}",
+            "https://maps.googleapis.com/maps/api/place/details/json"):
+            try:
+                if "v1/places" in url_places:
+                    r = requests.get(url_places, headers={
+                        "X-Goog-Api-Key": GOOGLE_MAPS_KEY,
+                        "X-Goog-FieldMask": "location,formattedAddress"},
+                        timeout=5).json()
+                    loc = r.get("location") or {}
+                    if "latitude" in loc:
+                        return jsonify({"status": "OK",
+                                        "lat": loc["latitude"],
+                                        "lon": loc["longitude"],
+                                        "nombre": r.get("formattedAddress", "")})
+                else:
+                    r = requests.get(url_places, params={
+                        "place_id": place_id,
+                        "fields": "geometry,formatted_address",
+                        "key": GOOGLE_MAPS_KEY}, timeout=5).json()
+                    if r.get("status") == "OK":
+                        loc = r["result"]["geometry"]["location"]
+                        return jsonify({"status": "OK", "lat": loc["lat"],
+                                        "lon": loc["lng"],
+                                        "nombre": r["result"].get(
+                                            "formatted_address", "")})
+            except Exception:
+                pass
+    if address:
+        res = _geo_por_address(
+            address if "jujuy" in address.lower()
+            else f"{address}, Jujuy, Argentina")
+        if res:
+            return jsonify(res)
+    return jsonify({"status": "ZERO_RESULTS"})
 
 
 if __name__ == "__main__":

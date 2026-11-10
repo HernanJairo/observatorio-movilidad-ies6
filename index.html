@@ -96,6 +96,41 @@
   #aviso-mapa.visible{display:flex}
   #aviso-mapa .pulso{width:9px;height:9px;border-radius:50%;background:var(--warn);animation:pulso 1.2s infinite}
   @keyframes pulso{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(245,158,11,.5)}50%{opacity:.6;box-shadow:0 0 0 7px rgba(245,158,11,0)}}
+  /* Buscador permanente del mapa (arterias y esquinas de la jurisdiccion) */
+  #mapa-busq-wrap{
+    position:absolute;top:60px;left:50%;transform:translateX(-50%);
+    z-index:9;width:min(430px,72vw);pointer-events:none;
+  }
+  #mapa-busq-wrap .ac-wrap{margin-bottom:0;pointer-events:auto}
+  #mapa-busq-wrap .ac-input{
+    box-shadow:0 4px 18px rgba(0,0,0,.5);border:1.5px solid rgba(56,189,248,.4);
+  }
+  #mapa-busq-wrap.destacado .ac-input{
+    border-color:var(--warn);
+    animation:busq-glow 1.6s ease-in-out infinite alternate;
+  }
+  @keyframes busq-glow{
+    from{box-shadow:0 0 0 3px rgba(245,158,11,.3),0 4px 18px rgba(0,0,0,.5)}
+    to{box-shadow:0 0 0 6px rgba(245,158,11,.12),0 4px 18px rgba(0,0,0,.5)}
+  }
+  #mapa-busq-wrap .ac-lista{pointer-events:auto}
+  #mapa-busq-confirm{
+    margin-top:7px;padding:10px 12px;pointer-events:auto;
+    background:rgba(13,20,34,.95);border:1.5px solid var(--ok);border-radius:11px;
+    font-size:12px;color:var(--txt);box-shadow:0 6px 20px rgba(0,0,0,.55);
+  }
+  #mapa-busq-confirm b{color:var(--ok)}
+  #mapa-busq-confirm .mbc-btns{display:flex;gap:8px;margin-top:8px}
+  #mapa-busq-ok{
+    flex:1;padding:8px 10px;border:none;border-radius:8px;font-weight:700;
+    font-size:12px;cursor:pointer;background:linear-gradient(135deg,#059669,#10b981);color:#fff;
+  }
+  #mapa-busq-x{
+    padding:8px 11px;border-radius:8px;cursor:pointer;font-size:12px;
+    background:rgba(148,163,184,.15);color:var(--txt);border:1px solid rgba(148,163,184,.35);
+  }
+  body.modo-eda #mapa-busq-wrap,body.modo-juego #mapa-busq-wrap,
+  body.modo-ml #mapa-busq-wrap,body.modo-noticias #mapa-busq-wrap{display:none}
   #modal-reporte{
     top:50%;left:50%;transform:translate(-50%,-50%);width:330px;z-index:40;
     border-color:rgba(249,115,22,.35);max-height:calc(100% - 48px);overflow-y:auto;
@@ -352,7 +387,12 @@
   #chat-panel[hidden]{display:none}
   #chat-panel .chat-head{padding:11px 14px;font-size:12.5px;font-weight:700;border-bottom:1px solid var(--panel-border);display:flex;align-items:center;gap:8px}
   #chat-panel .chat-head .estado{margin-left:auto;font-size:9.5px;font-weight:600;color:var(--txt-dim)}
-  #chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;min-height:160px}
+  #chat-msgs,#chat-panel-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;min-height:160px}
+  #chat-panel-cerrar{
+    margin-left:auto;padding:3px 9px;font-size:12px;font-weight:800;color:var(--txt-dim);
+    background:none;border:1px solid var(--panel-border);border-radius:8px;cursor:pointer;
+  }
+  #chat-panel-cerrar:hover{color:var(--txt);border-color:var(--txt-dim)}
   .msg{max-width:84%;padding:13px 17px;border-radius:16px;font-size:1.05rem;line-height:1.6;white-space:pre-wrap}
   .msg.user{align-self:flex-end;background:rgba(56,189,248,.18);border:1px solid rgba(56,189,248,.35);border-bottom-right-radius:4px}
   .msg.ia{align-self:flex-start;background:rgba(139,92,246,.14);border:1px solid rgba(139,92,246,.35);border-bottom-left-radius:4px}
@@ -403,6 +443,62 @@
   }
   .jg-subtab:hover{color:var(--txt);border-color:var(--accent)}
   .jg-subtab.activo{background:rgba(56,189,248,.16);border-color:var(--accent);color:var(--accent);box-shadow:inset 0 0 0 1px rgba(56,189,248,.35)}
+  .juego-main{position:relative;min-width:0}
+  /* HUD: jugador + vidas + puntuacion + racha + nivel de dificultad */
+  .jg-hud{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-bottom:14px}
+  /* Overlay arcade: inicio (nombre) y fin del recorrido */
+  .jg-overlay{
+    position:absolute;inset:-6px;z-index:6;display:flex;align-items:center;
+    justify-content:center;border-radius:16px;
+    background:rgba(9,14,26,.93);backdrop-filter:blur(3px);
+  }
+  .jg-overlay[hidden]{display:none}
+  .jg-over-card{
+    width:min(420px,92%);text-align:center;padding:30px 26px;border-radius:18px;
+    background:linear-gradient(160deg,rgba(30,41,59,.95),rgba(13,20,34,.98));
+    border:1px solid rgba(139,92,246,.45);
+    box-shadow:0 18px 60px rgba(0,0,0,.55);
+    animation:jg-over-in .5s cubic-bezier(.2,.9,.3,1.3);
+  }
+  @keyframes jg-over-in{
+    0%{transform:scale(.82) translateY(18px);opacity:0}
+    100%{transform:scale(1) translateY(0);opacity:1}
+  }
+  .jg-over-ico{font-size:46px;margin-bottom:8px;animation:jg-bounce 1.6s ease-in-out infinite}
+  @keyframes jg-bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+  .jg-over-tit{font-size:1.45rem;font-weight:800;color:#f8fafc;margin-bottom:8px}
+  .jg-over-tit.rojo{color:#f87171;text-shadow:0 0 22px rgba(239,68,68,.5)}
+  .jg-over-sub{font-size:.92rem;color:#b8c4d6;line-height:1.6;margin-bottom:16px}
+  .jg-over-sub b{color:#7dd3fc}
+  #jg-nombre{
+    width:100%;padding:12px 14px;font-size:15px;font-weight:700;text-align:center;
+    color:var(--txt);background:rgba(13,20,34,.9);border:1px solid var(--panel-border);
+    border-radius:11px;outline:none;margin-bottom:12px;color-scheme:dark;
+  }
+  #jg-nombre:focus{border-color:var(--accent)}
+  .jg-fin-stats{
+    margin:6px 0 16px;font-size:.95rem;line-height:1.9;color:#c9d5e6;
+  }
+  .jg-fin-stats b{color:#fbbf24;font-size:1.15rem}
+  .jg-fin-stats .jg-fin-nivel{display:block;font-size:11px;font-weight:800;
+    text-transform:uppercase;letter-spacing:.8px;color:#a78bfa}
+  #jg-vidas{letter-spacing:1px}
+  .jg-stat{
+    display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:12px;
+    background:rgba(30,41,59,.55);border:1px solid var(--panel-border);
+  }
+  .jg-stat>span{font-size:22px;flex:0 0 auto}
+  .jg-stat b{display:block;font-size:17px;font-weight:800;line-height:1.1}
+  .jg-stat small{font-size:9px;font-weight:700;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.6px}
+  .jg-stat.n3{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.08)}
+  .jg-stat.n2{border-color:rgba(245,158,11,.5);background:rgba(245,158,11,.07)}
+  .jg-dif{
+    display:inline-block;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.6px;
+    padding:3px 9px;border-radius:7px;vertical-align:middle;margin-right:7px;
+  }
+  .jg-dif.d1{color:#34d399;background:rgba(16,185,129,.14);border:1px solid rgba(16,185,129,.4)}
+  .jg-dif.d2{color:#fbbf24;background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.45)}
+  .jg-dif.d3{color:#f87171;background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.5)}
   .jg-setup{display:grid;grid-template-columns:140px 1fr;gap:12px;margin-bottom:12px}
   .jg-setup .campo{margin-bottom:0}
   #jg-edad{
@@ -448,6 +544,12 @@
   .jg-otra{margin-top:11px;width:100%;padding:10px;font-size:12.5px;font-weight:700;color:var(--accent);background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.35);border-radius:10px;cursor:pointer}
   .jg-otra:hover{background:rgba(56,189,248,.2)}
   #jg-score{font-size:11px;color:var(--txt-dim);margin-top:10px;text-align:right}
+  .jg-univ{
+    font-size:12.5px;color:var(--txt-dim);line-height:1.55;margin-bottom:12px;
+    padding:9px 12px;border-radius:10px;background:rgba(139,92,246,.08);
+    border:1px solid rgba(139,92,246,.3);
+  }
+  .jg-univ b{color:#a78bfa}
   /* Trivia V/F */
   .tv-card{
     background:linear-gradient(135deg,rgba(139,92,246,.1),rgba(56,189,248,.08));
@@ -601,6 +703,36 @@
   }
   #panel-noticias textarea{resize:vertical;min-height:70px}
   #panel-noticias input:focus,#panel-noticias textarea:focus{border-color:var(--warn)}
+  /* Panel de ingesta por pegado completo */
+  .np-panel .cuerpo{display:flex;flex-direction:column;gap:8px}
+  .np-panel textarea{
+    width:100%;min-height:110px;background:#0b1524;color:#dbe7f8;
+    border:1px solid #2a4263;border-radius:8px;padding:8px;
+    font:12px/1.45 'Segoe UI',system-ui,sans-serif;resize:vertical}
+  .np-panel input,.np-panel select{
+    width:100%;background:#0b1524;color:#dbe7f8;
+    border:1px solid #2a4263;border-radius:7px;padding:6px;font-size:12px}
+  .np-geo{font-size:11px;color:#fbbf24;padding:4px 0}
+  .np-geo.ok{color:#34d399}
+  .np-panel .nf-fila{display:flex;gap:8px;flex-wrap:wrap}
+  .np-panel .nf-col{flex:1 1 30%;min-width:110px}
+  .np-panel label{font-size:10.5px;color:#7d92ad}
+  /* Titulo del panel de ingesta unificada */
+  .np-titulo{
+    font-size:13px;font-weight:700;margin:0 0 4px;display:flex;
+    align-items:center;gap:8px;color:var(--txt);
+  }
+  /* Pestañas del Monitor: escaneo automatico vs pegado manual */
+  .mt-tabs{display:flex;gap:6px;margin-bottom:10px}
+  .mt-tab{
+    flex:1;padding:9px 8px;font-size:11.5px;font-weight:700;cursor:pointer;
+    color:var(--txt-dim);background:rgba(30,41,59,.7);
+    border:1px solid #2a4263;border-radius:9px;transition:.15s;
+  }
+  .mt-tab.activa{color:#fff;border-color:#a78bfa;background:rgba(124,58,237,.28)}
+  .mt-tab:hover{color:var(--txt)}
+  .notg-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 12px;margin-bottom:12px}
+  .notg-grid .campo{margin-bottom:0}
   .btn-escanear{
     width:100%;padding:12px;font-size:13.5px;font-weight:700;color:#1a0d00;border:none;
     border-radius:10px;cursor:pointer;transition:.15s;letter-spacing:.3px;
@@ -608,15 +740,32 @@
   }
   .btn-escanear:hover{filter:brightness(1.12)}
   .btn-escanear:disabled{opacity:.55;cursor:wait}
-  .notg-manual{margin-top:10px;border-top:1px solid var(--panel-border);padding-top:10px}
-  .notg-manual summary{
-    font-size:12px;font-weight:700;cursor:pointer;list-style:none;
-    display:flex;align-items:center;gap:7px;color:var(--txt-dim);
+  /* Tarjetas de resultados del escaneo automatico */
+  .mn-card{
+    background:rgba(30,41,59,.55);border:1px solid var(--panel-border);
+    border-radius:10px;padding:10px 12px;margin-top:8px;
   }
-  .notg-manual summary::-webkit-details-marker{display:none}
-  .notg-manual summary::before{content:'▸';color:var(--warn);transition:.15s}
-  .notg-manual[open] summary::before{transform:rotate(90deg)}
-  .notg-manual .cuerpo{margin-top:10px}
+  .mn-card-tit{font-size:12.5px;font-weight:700;line-height:1.35}
+  .mn-card-tit a{color:var(--txt);text-decoration:none}
+  .mn-card-tit a:hover{color:var(--accent);text-decoration:underline}
+  .mn-card-meta{font-size:10.5px;color:var(--txt-dim);margin-top:4px}
+  .mn-analizar{
+    width:100%;margin-top:8px;padding:8px;font-size:11.5px;font-weight:700;
+    border-radius:8px;cursor:pointer;color:#7dd3fc;
+    background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.4);
+    transition:.15s;
+  }
+  .mn-analizar:hover{background:rgba(56,189,248,.22)}
+  .mn-analizar:disabled{opacity:.55;cursor:wait}
+  .mn-vacio{font-size:11px;color:var(--txt-dim);padding:8px 2px}
+  .np-geo-btns{display:flex;gap:8px}
+  .np-geo-btns .notg-pickbtn{flex:1}
+  .notg-pickbtn{
+    width:100%;padding:7px;font-size:11.5px;font-weight:700;cursor:pointer;
+    color:#7dd3fc;background:rgba(56,189,248,.1);
+    border:1px solid rgba(56,189,248,.4);border-radius:8px;transition:.15s;
+  }
+  .notg-pickbtn:hover{background:rgba(56,189,248,.22)}
   .btn-not-analizar{
     width:100%;padding:10px;font-size:12.5px;font-weight:700;border:none;border-radius:9px;
     cursor:pointer;color:#fff;background:linear-gradient(135deg,#7c3aed,#a78bfa);transition:.15s;
@@ -626,35 +775,6 @@
   .btn-not-analizar:disabled{opacity:.55;cursor:wait}
   .not-status{font-size:11.5px;color:var(--txt-dim);margin:10px 0 4px;min-height:13px}
   .not-status b{color:var(--accent)}
-  .notg-band-tit{
-    font-size:13px;font-weight:700;margin:14px 0 8px;display:flex;align-items:center;gap:8px;
-    border-top:1px solid var(--panel-border);padding-top:12px;
-  }
-  .notg-band-tit span{font-size:10.5px;font-weight:600;color:var(--txt-dim)}
-  .notg-card{
-    background:rgba(30,41,59,.55);border:1px solid var(--panel-border);border-radius:11px;
-    padding:11px 13px;margin-bottom:9px;
-  }
-  .notg-card.dup{border-color:rgba(245,158,11,.4)}
-  .notg-top{display:flex;align-items:flex-start;gap:9px}
-  .notg-tit{flex:1;min-width:0;font-size:12.5px;font-weight:700;line-height:1.35}
-  .notg-tit a{color:var(--txt);text-decoration:none}
-  .notg-tit a:hover{color:var(--accent);text-decoration:underline}
-  .notg-badge{
-    flex:0 0 auto;font-size:9.5px;font-weight:800;padding:3px 9px;border-radius:20px;
-    text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;
-  }
-  .notg-badge.nueva{color:#34d399;border:1px solid rgba(52,211,153,.5);background:rgba(16,185,129,.12)}
-  .notg-badge.dup{color:#fbbf24;border:1px solid rgba(245,158,11,.55);background:rgba(245,158,11,.12)}
-  .notg-badge.ok{color:#38bdf8;border:1px solid rgba(56,189,248,.5);background:rgba(56,189,248,.12)}
-  .notg-meta{font-size:10.5px;color:var(--txt-dim);margin-top:5px}
-  .notg-meta b{color:var(--txt);font-weight:600}
-  .notg-extra{
-    font-size:11px;color:var(--txt-dim);margin-top:7px;padding:8px 9px;
-    background:rgba(13,20,34,.5);border-radius:8px;line-height:1.5;
-  }
-  .notg-extra b{color:var(--txt);font-weight:600}
-  .notg-dup-msg{font-size:10.5px;color:#fbbf24;margin-top:5px}
   .notg-incorporar{
     width:100%;margin-top:9px;padding:9px;font-size:12px;font-weight:700;border:none;
     border-radius:8px;cursor:pointer;color:#fff;transition:.15s;
@@ -662,40 +782,24 @@
   }
   .notg-incorporar:hover{filter:brightness(1.12)}
   .notg-incorporar:disabled{opacity:.5;cursor:default}
-  /* Mini formulario de incorporación dentro de la propia tarjeta */
-  .notg-form{
-    margin-top:9px;padding:10px;border-radius:9px;
-    background:rgba(13,20,34,.6);border:1px solid rgba(16,185,129,.4);
+  /* Autocompletado del buscador del mapa (estado vacio) */
+  .notg-ac-vacia{padding:8px;font-size:10.5px;color:var(--txt-dim);cursor:default}
+  #mapa-ac li.sel{background:rgba(56,189,248,.18)}
+  /* Marcador pulsante temporal sobre el punto de la noticia */
+  .pulso-noticia{position:relative;width:26px;height:26px}
+  .pulso-nucleo{
+    position:absolute;inset:7px;border-radius:50%;background:#f43f5e;
+    border:2px solid #fff;box-shadow:0 0 12px rgba(244,63,94,.9);
   }
-  .notg-form .nf-fila{display:flex;gap:6px;margin-bottom:6px}
-  .notg-form .nf-fila>div{flex:1;min-width:0}
-  .notg-form .nf-lbl{display:block;font-size:9px;font-weight:700;text-transform:uppercase;
-    letter-spacing:.5px;color:var(--txt-dim);margin-bottom:3px}
-  .notg-form input,.notg-form select{
-    width:100%;padding:6px 8px;font-size:11.5px;color:var(--txt);
-    background:rgba(30,41,59,.9);border:1px solid var(--panel-border);
-    border-radius:7px;outline:none;font-family:inherit;color-scheme:dark;
+  .pulso-onda{
+    position:absolute;inset:0;border-radius:50%;
+    border:3px solid rgba(244,63,94,.75);animation:onda-noticia 1.6s ease-out infinite;
   }
-  .notg-form input:focus,.notg-form select:focus{border-color:#10b981}
-  .notg-form input.nf-error{border-color:var(--danger)}
-  .nf-acciones{display:flex;gap:7px;margin-top:8px}
-  .notg-guardar{
-    flex:1;padding:8px;font-size:11.5px;font-weight:700;border:none;border-radius:8px;
-    cursor:pointer;color:#fff;background:linear-gradient(135deg,#059669,#10b981);transition:.15s;
-  }
-  .notg-guardar:hover{filter:brightness(1.12)}
-  .notg-guardar:disabled{opacity:.5;cursor:wait}
-  .notg-cancelar{
-    flex:0 0 auto;padding:8px 12px;font-size:11.5px;font-weight:700;border-radius:8px;
-    cursor:pointer;color:var(--txt-dim);background:rgba(30,41,59,.7);
-    border:1px solid var(--panel-border);transition:.15s;
-  }
-  .notg-cancelar:hover{color:var(--txt);border-color:var(--txt-dim)}
-  .notg-form .nf-geo{font-size:9.5px;color:var(--txt-dim);margin-top:6px}
+  @keyframes onda-noticia{0%{transform:scale(.4);opacity:1}100%{transform:scale(2.6);opacity:0}}
   @media print{
     html,body{overflow:visible;height:auto;background:#fff;color:#111}
     #map,#tabs,#panel-filtros,#panel-alertas,#panel-juego,#panel-ml,
-    #panel-noticias,#btn-chat,#aviso-mapa,#toast,#nav-card,#itin-card,.btn-print{display:none!important}
+    #panel-noticias,#btn-chat,#chat-panel,#aviso-mapa,#toast,#nav-card,#itin-card,.btn-print{display:none!important}
     #panel-eda{
       display:block!important;position:static;transform:none;width:100%;max-height:none;
       overflow:visible;background:#fff;color:#111;border:none;box-shadow:none;
@@ -743,10 +847,14 @@
   <div class="campo">
     <label>Jurisdicción</label>
     <select id="sel-jurisdiccion">
-      <option value="Perico" selected>Perico</option>
-      <option value="Monterrico">Monterrico</option>
-      <option value="El Carmen">El Carmen</option>
-      <option value="San Salvador de Jujuy">San Salvador</option>
+      <option value="TODOS" selected>🌐 Toda la Región (Valles y Capital)</option>
+      <option value="Perico">🏙️ Ciudad Perico</option>
+      <option value="Monterrico">🌱 Monterrico</option>
+      <option value="El Carmen">🏞️ El Carmen</option>
+      <option value="Palpalá">🏭 Palpalá</option>
+      <option value="San Salvador de Jujuy">🏛️ San Salvador de Jujuy</option>
+      <option value="San Pedro de Jujuy">🌿 San Pedro de Jujuy</option>
+      <option value="RUTAS">🛣️ Solo Rutas y Accesos (RN 66, RN 9, RP 42, RP 47)</option>
     </select>
   </div>
 
@@ -843,11 +951,14 @@
       <div class="campo">
         <label>Ciudad / Jurisdicción</label>
         <select id="rad-ciudad">
-          <option value="Perico" selected>Perico</option>
-          <option value="El Carmen">El Carmen</option>
-          <option value="Monterrico">Monterrico</option>
-          <option value="San Salvador de Jujuy">San Salvador de Jujuy</option>
-          <option value="Todo Jujuy">Todo Jujuy</option>
+          <option value="TODOS">🌐 Toda la Región (Valles y Capital)</option>
+          <option value="Perico" selected>🏙️ Ciudad Perico</option>
+          <option value="Monterrico">🌱 Monterrico</option>
+          <option value="El Carmen">🏞️ El Carmen</option>
+          <option value="Palpalá">🏭 Palpalá</option>
+          <option value="San Salvador de Jujuy">🏛️ San Salvador de Jujuy</option>
+      <option value="San Pedro de Jujuy">🌿 San Pedro de Jujuy</option>
+          <option value="RUTAS">🛣️ Solo Rutas y Accesos (RN 66, RN 9, RP 42, RP 47)</option>
         </select>
       </div>
       <div class="campo">
@@ -875,6 +986,15 @@
   Haz clic en el mapa sobre la intersección o punto del incidente
 </div>
 
+<div id="mapa-busq-wrap">
+  <div class="ac-wrap" id="mapa-ac-wrap">
+    <input type="text" id="mapa-busq" class="ac-input"
+      placeholder="🔎 Buscar arteria o esquina (ej. Belgrano y 9 de Julio)…"
+      autocomplete="off">
+    <ul class="ac-lista" id="mapa-ac" hidden></ul>
+  </div>
+</div>
+
 <div class="panel" id="modal-reporte" hidden>
   <h3><span class="pin"></span>Reporte ciudadano</h3>
   <div id="rep-coords"></div>
@@ -885,6 +1005,8 @@
       <option value="Perico">Perico</option>
       <option value="Monterrico">Monterrico</option>
       <option value="El Carmen">El Carmen</option>
+      <option value="Palpalá">Palpalá</option>
+      <option value="San Pedro de Jujuy">San Pedro</option>
       <option value="San Salvador de Jujuy">San Salvador</option>
     </select>
   </div>
@@ -984,22 +1106,18 @@
         <button class="jg-subtab" id="subtab-trivia">❓ Mito o Realidad (V/F)</button>
       </div>
 
+      <div class="jg-hud" id="jg-hud">
+        <div class="jg-stat"><span>👤</span><div><b id="jg-jugador">–</b><small>Jugador</small></div></div>
+        <div class="jg-stat"><span>💗</span><div><b id="jg-vidas">❤️❤️❤️</b><small>Vidas</small></div></div>
+        <div class="jg-stat"><span>🏆</span><div><b id="jg-puntos">0</b><small>Puntuación</small></div></div>
+        <div class="jg-stat"><span>🔥</span><div><b id="jg-racha">x1</b><small>Racha actual</small></div></div>
+        <div class="jg-stat n1" id="jg-stat-nivel"><span>🎖️</span><div><b id="jg-nivel">Principiante</b><small>Nivel de Dificultad</small></div></div>
+      </div>
+
       <section id="juego-decisiones">
-        <div class="jg-setup">
-          <div class="campo">
-            <label>Tu edad</label>
-            <input type="number" id="jg-edad" min="10" max="95" value="22">
-          </div>
-          <div class="campo">
-            <label>Tu transporte</label>
-            <div class="jg-iconos" id="jg-iconos">
-              <button class="jg-ico activo" data-modo="MOTO">🏍️<span>Moto</span></button>
-              <button class="jg-ico" data-modo="BICICLETA">🚲<span>Bici</span></button>
-              <button class="jg-ico" data-modo="PEATON">🚶<span>Peatón</span></button>
-              <button class="jg-ico" data-modo="AUTO">🚗<span>Auto</span></button>
-            </div>
-          </div>
-        </div>
+        <p class="jg-univ">♾️ <b>Modo supervivencia infinito</b>: dilemas
+          técnicos de todos los vehículos (auto, moto, bici, peatón y
+          carga) hasta perder las 3 vidas.</p>
         <button id="jg-generar" class="btn-ml">🎲 Generar situación</button>
         <div id="jg-dilema" hidden>
           <div class="jg-card" id="jg-card">
@@ -1031,6 +1149,27 @@
         </div>
         <button id="tv-siguiente" class="btn-tv-sig">🎯 Siguiente Desafío ➜</button>
       </section>
+
+      <!-- Overlay arcade: pantalla de inicio (nombre) y fin del recorrido -->
+      <div class="jg-overlay" id="jg-overlay" hidden>
+        <div class="jg-over-card" id="jg-start-card">
+          <div class="jg-over-ico">🎮</div>
+          <div class="jg-over-tit">Mitos &amp; Decisiones Viales</div>
+          <p class="jg-over-sub">Tenés <b>3 vidas</b>. Cada acierto suma
+            <b>100 pts × tu racha</b> (x1, x2, x3).<br>
+            Principiante (0–300) → Avanzado (300–700) →
+            <b>Ingeniero Vial</b> (+700).</p>
+          <input type="text" id="jg-nombre" maxlength="18" autocomplete="off"
+            placeholder="Ingresá tu nombre / apodo">
+          <button id="jg-comenzar" class="btn-ml">▶ Comenzar Recorrido</button>
+        </div>
+        <div class="jg-over-card" id="jg-fin-card" hidden>
+          <div class="jg-over-ico">🏁</div>
+          <div class="jg-over-tit rojo">Fin del Recorrido</div>
+          <div class="jg-fin-stats" id="jg-fin-stats"></div>
+          <button id="jg-reintentar" class="btn-ml">🔄 Volver a Jugar</button>
+        </div>
+      </div>
     </div>
 
     <aside class="juego-side">
@@ -1173,12 +1312,14 @@
   <div class="eda-filtro">
     <label for="eda-jur">Ámbito del análisis</label>
     <select id="eda-jur">
-      <option value="" selected>🌐 Todos los Valles (Región Completa)</option>
-      <option value="PERICO">🏙️ Perico (Casco Urbano)</option>
+      <option value="" selected>🌐 Toda la Región (Valles y Capital)</option>
+      <option value="PERICO">🏙️ Ciudad Perico</option>
       <option value="MONTERRICO">🌱 Monterrico</option>
       <option value="EL CARMEN">🏞️ El Carmen</option>
-      <option value="SAN SALVADOR DE JUJUY">🌆 San Salvador de Jujuy</option>
-      <option value="RUTAS">🛣️ Rutas y Accesos (RP 47, RN 66, RP 42)</option>
+      <option value="PALPALA">🏭 Palpalá</option>
+      <option value="SAN SALVADOR DE JUJUY">🏛️ San Salvador de Jujuy</option>
+      <option value="SAN PEDRO DE JUJUY">🌿 San Pedro de Jujuy</option>
+      <option value="RUTAS">🛣️ Solo Rutas y Accesos (RN 66, RN 9, RP 42, RP 47)</option>
     </select>
   </div>
 
@@ -1229,54 +1370,124 @@
 </aside>
 
 <aside class="panel" id="panel-noticias">
-  <h2>📰 Monitor de Prensa</h2>
-  <p class="ml-sub">Escaneo automático de Google News + ingesta manual, con extracción IA y control de duplicados.</p>
+  <h2>📰 Monitor de Noticias</h2>
+  <p class="ml-sub">Escaneo automático en diarios locales o ingesta manual, con extracción IA y guardado directo al dataset.</p>
 
-  <div class="notg-grid">
-    <div class="campo">
-      <label>Jurisdicción / Zona</label>
-      <select id="notg-zona">
-        <option value="Perico">Ciudad Perico</option>
-        <option value="El Carmen">El Carmen</option>
-        <option value="Monterrico">Monterrico</option>
-        <option value="San Salvador de Jujuy">San Salvador de Jujuy</option>
-        <option value="Jujuy" selected>Todo Jujuy</option>
-      </select>
-    </div>
-    <div class="campo">
-      <label>Período</label>
-      <select id="notg-periodo">
-        <option value="48h" selected>Últimas 48 horas</option>
-        <option value="semana">Esta semana</option>
-        <option value="mes">Este mes</option>
-      </select>
-    </div>
+  <div class="mt-tabs">
+    <button id="mt-tab-scan" class="mt-tab activa" type="button">🌐 1. Escaneo Automático en Diarios</button>
+    <button id="mt-tab-paste" class="mt-tab" type="button">✍️ 2. Pegar Noticia o Enlace</button>
   </div>
 
-  <button id="btn-escanear" class="btn-escanear">🌐 Escanear Noticias de Tránsito en Google</button>
-
-  <details class="notg-manual">
-    <summary>✍️ Pegar texto o URL de una noticia manualmente</summary>
-    <div class="cuerpo">
+  <div id="mt-pane-scan">
+    <div class="notg-grid">
       <div class="campo">
-        <label>Enlace (opcional)</label>
-        <input type="text" id="notg-url" placeholder="https://eltribuno.info/…" autocomplete="off">
+        <label>Jurisdicción / Zona</label>
+        <select id="notg-zona">
+          <option value="San Pedro de Jujuy">🌿 San Pedro de Jujuy</option>
+          <option value="Perico">🏙️ Ciudad Perico</option>
+          <option value="Monterrico">🌱 Monterrico</option>
+          <option value="El Carmen">🏞️ El Carmen</option>
+          <option value="Palpalá">🏭 Palpalá</option>
+          <option value="San Salvador de Jujuy">🏛️ San Salvador de Jujuy</option>
+          <option value="TODOS" selected>🌐 Toda la Región</option>
+        </select>
       </div>
       <div class="campo">
-        <label>Texto de la crónica periodística</label>
-        <textarea id="notg-texto" rows="4" placeholder="Pegá acá el cuerpo de la noticia (El Tribuno, Somos Jujuy, Todo Jujuy…)"></textarea>
+        <label>Período</label>
+        <select id="notg-periodo">
+          <option value="24h" selected>Últimas 24 horas</option>
+          <option value="semana">Esta semana</option>
+          <option value="mes">Este mes</option>
+        </select>
       </div>
-      <button id="btn-analizar-noticia" class="btn-not-analizar">🔍 Analizar Noticia con IA</button>
     </div>
-  </details>
+    <button id="btn-escanear" class="btn-escanear">🌐 Escanear Noticias de Tránsito en Google</button>
+    <div id="mn-lista"></div>
+  </div>
+
+  <div id="mt-pane-paste" hidden>
+    <div class="np-panel"><div class="cuerpo">
+      <textarea id="np-entrada" rows="7"
+        placeholder="Pega aquí el enlace (URL) o el texto completo de la noticia (de portales, Facebook, WhatsApp, etc.)..."></textarea>
+      <div class="nf-fila">
+        <div class="nf-col"><label>🗞️ Fuente / Origen</label>
+          <input type="text" id="np-fuente" list="fuentes-sugeridas"
+            placeholder="Facebook, El Tribuno…" autocomplete="off">
+          <datalist id="fuentes-sugeridas">
+            <option value="Facebook"></option>
+            <option value="El Tribuno"></option>
+            <option value="Somos Jujuy"></option>
+            <option value="Jujuy al Momento"></option>
+            <option value="Policiales Jujuy"></option>
+          </datalist></div>
+      </div>
+      <button id="btn-extraer-nota" class="btn-not-analizar">🧠 Analizar con IA</button>
+    </div></div>
+  </div>
+
+  <div class="np-panel"><div class="cuerpo">
+    <div id="np-form" hidden>
+      <div class="nf-fila">
+        <div class="nf-col"><label>Jurisdicción</label>
+          <select id="np-jur">
+            <option>Perico</option><option>Monterrico</option>
+            <option>El Carmen</option><option>Palpalá</option>
+            <option>San Pedro de Jujuy</option>
+            <option>San Salvador de Jujuy</option><option>Rutas</option>
+          </select></div>
+        <div class="nf-col"><label>Arteria principal</label>
+          <input id="np-c1" autocomplete="off"></div>
+        <div class="nf-col"><label>Arteria secundaria / Referencia</label>
+          <input id="np-c2" autocomplete="off"></div>
+      </div>
+      <div class="nf-fila">
+        <div class="nf-col"><label>🚘 Vehículo Principal</label>
+          <select id="np-v1"></select></div>
+        <div class="nf-col"><label>🚗 Contraparte</label>
+          <select id="np-v2"></select></div>
+        <div class="nf-col"><label>👥 Cantidad de Víctimas</label>
+          <input id="np-victimas" type="number" min="0" max="50" step="1" value="1"></div>
+        <div class="nf-col"><label>🩺 Estado de Víctimas</label>
+          <select id="np-estado"></select></div>
+      </div>
+      <div class="nf-fila">
+        <div class="nf-col" style="flex:1 1 100%"><label>📝 Resumen del Siniestro</label>
+          <textarea id="np-resumen" rows="2"></textarea></div>
+      </div>
+      <div class="nf-fila">
+        <div class="nf-col"><label>📅 Fecha del siniestro</label>
+          <input id="np-fecha" type="date"></div>
+        <div class="nf-col"><label>Lat</label>
+          <input id="np-lat" readonly></div>
+        <div class="nf-col"><label>Lon</label>
+          <input id="np-lon" readonly></div>
+      </div>
+      <div class="np-geo-btns">
+        <button id="np-vermapa" class="notg-pickbtn" type="button">🗺️ Ver en el mapa</button>
+        <button id="np-mapbtn" class="notg-pickbtn" type="button">📍 Ajustar punto</button>
+      </div>
+      <div id="np-geo-txt" class="np-geo"></div>
+      <button id="np-guardar" class="notg-incorporar" type="button">✅ Confirmar e Incorporar a Base de Datos</button>
+    </div>
+  </div></div>
 
   <div id="notg-status" class="not-status"></div>
-
-  <h3 class="notg-band-tit">🗂️ Bandeja de Detecciones <span id="notg-count"></span></h3>
-  <div id="noticias-lista"><div class="vacio">Escaneá Google News o analizá una noticia para comenzar.</div></div>
 </aside>
 
 <button id="btn-chat">💬 Copiloto IA</button>
+
+<!-- Panel de chat flotante: accesible desde cualquier pestaña -->
+<div class="panel" id="chat-panel" hidden>
+  <div class="chat-head">💬 Copiloto IA
+    <span class="estado" id="chat-panel-estado"></span>
+    <button id="chat-panel-cerrar" title="Cerrar">✕</button>
+  </div>
+  <div id="chat-panel-msgs"></div>
+  <div class="chat-input">
+    <input type="text" id="chat-panel-texto" placeholder="Preguntá al copiloto…" autocomplete="off">
+    <button id="chat-panel-enviar">Enviar</button>
+  </div>
+</div>
 
 <div id="toast"></div>
 
@@ -1294,10 +1505,15 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script>
 const MUNICIPIOS = {
+  'TODOS':      { center: [-65.19, -24.29], zoom: 11.4 },
   'Perico':     { center: [-65.117, -24.377], zoom: 14 },
   'Monterrico': { center: [-65.161, -24.438], zoom: 14 },
   'El Carmen':  { center: [-65.259, -24.388], zoom: 13.6 },
+  'Palpalá':    { center: [-65.212, -24.256], zoom: 13.8 },
   'San Salvador de Jujuy': { center: [-65.299, -24.185], zoom: 13 },
+  'San Pedro de Jujuy': { center: [-64.866, -24.233], zoom: 13.8 },
+  // Corredor interurbano RN 66 / RN 9 / RP 42 / RP 47
+  'RUTAS':      { center: [-65.19, -24.29], zoom: 11.7 },
 };
 
 const PESO_GRAVEDAD = { 'GRAVE': 2.0, 'LEVE': 1.0, 'SOLO DAÑOS': 0.5 };
@@ -1325,8 +1541,8 @@ const map = new maplibregl.Map({
       { id: 'osm', type: 'raster', source: 'osm' },
     ],
   },
-  center: MUNICIPIOS['Perico'].center,
-  zoom: MUNICIPIOS['Perico'].zoom,
+  center: MUNICIPIOS['TODOS'].center,
+  zoom: MUNICIPIOS['TODOS'].zoom,
   minZoom: 11,
   maxZoom: 19,
   pitch: 15,
@@ -1489,6 +1705,11 @@ map.on('load', () => {
 
 /* ---------- Estado y fetch ---------- */
 const $ = (id) => document.getElementById(id);
+// Helpers globales de texto/HTML usados por todo el tablero.
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const noEsp = (v) => (!v || v === 'NO ESPECIFICADO' ? '' : v);
+const tit = (s) => String(s || '').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 const selJur = $('sel-jurisdiccion'), selModo = $('sel-modo'), selDia = $('sel-dia');
 const hDesde = $('h-desde'), hHasta = $('h-hasta');
 
@@ -1617,6 +1838,10 @@ $('btn-reportar').addEventListener('click', () => {
 });
 
 map.on('click', (e) => {
+  if (npPicking) {
+    npCapturarPunto(e.lngLat);
+    return;
+  }
   if (modoReporte) {
     coordsReporte = { lat: e.lngLat.lat, lng: e.lngLat.lng };
     if (markerReporte) markerReporte.remove();
@@ -1635,7 +1860,10 @@ async function abrirModalReporte() {
   $('modal-reporte').hidden = false;
   $('rep-coords').textContent =
     `${coordsReporte.lat.toFixed(6)}, ${coordsReporte.lng.toFixed(6)}`;
-  $('rep-jur').value = selJur.value;  // precarga con el filtro activo del mapa
+  // Precarga con el filtro activo del mapa (TODOS/RUTAS no son ciudad ->
+  // cae a Perico, que el usuario puede corregir en el formulario).
+  $('rep-jur').value = ['Perico', 'Monterrico', 'El Carmen', 'Palpalá',
+    'San Pedro de Jujuy', 'San Salvador de Jujuy'].includes(selJur.value) ? selJur.value : 'Perico';
 
   // Fecha y hora precargadas con el momento actual (editables)
   const ahora = new Date();
@@ -1733,251 +1961,487 @@ $('rep-confirmar').addEventListener('click', async () => {
 });
 
 /* ---------- Monitor de prensa ---------- */
-let noticiasBandeja = [];   // tarjetas renderizadas en la bandeja
-
-const noEsp = (v) => (!v || v === 'NO ESPECIFICADO' ? '' : v);
-const tit = (s) => String(s || '').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
-  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-
-function ubicacionNoticia(n, e) {
-  if (e.calle_1 && e.calle_1 !== 'NO ESPECIFICADO') {
-    let t = tit(e.calle_1);
-    if (e.calle_2 && e.calle_2 !== 'NO ESPECIFICADO') t += ' y ' + tit(e.calle_2);
-    if (e.ciudad && e.ciudad !== 'NO ESPECIFICADO') t += ' · ' + e.ciudad;
-    return t;
-  }
-  return (n.geo && n.geo.fuente !== 'centro-ciudad' && n.geo.nombre)
-    || 'Ubicación no detectada';
-}
-
-function renderBandeja() {
-  const cont = $('noticias-lista');
-  $('notg-count').textContent =
-    noticiasBandeja.length ? `· ${noticiasBandeja.length} detección${noticiasBandeja.length !== 1 ? 'es' : ''}` : '';
-  if (!noticiasBandeja.length) {
-    cont.innerHTML = '<div class="vacio">Sin detecciones todavía.</div>';
-    return;
-  }
-  cont.innerHTML = noticiasBandeja.map((n, i) => {
-    const e = n.extraido || {};
-    const dup = n.es_duplicado;
-    const veh = [e.modo_desplazamiento_victima, e.contraparte_siniestro]
-      .filter((v) => v && v !== 'NO ESPECIFICADO')
-      .map(tit).join(' 🆚 ');
-    const fecha = noEsp(e.fecha_aprox) || String(n.fecha_pub || '').slice(0, 10) || 's/f';
-    const badge = n._incorporado
-      ? '<span class="notg-badge ok">✅ Incorporada</span>'
-      : dup
-        ? '<span class="notg-badge dup">🟡 Posible Duplicado</span>'
-        : '<span class="notg-badge nueva">🟢 Nueva</span>';
-    const titulo = n.url
-      ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.titulo)}</a>`
-      : esc(n.titulo);
-    return `<div class="notg-card ${dup ? 'dup' : ''}">
-      <div class="notg-top"><div class="notg-tit">${titulo}</div>${badge}</div>
-      <div class="notg-meta"><b>${esc(n.medio || 'Manual')}</b> · ${esc(fecha)}${noEsp(e.hora_aprox) ? ' ' + esc(e.hora_aprox) + ' h' : ''}</div>
-      <div class="notg-meta">📍 <b>${esc(ubicacionNoticia(n, e))}</b> · 🚘 <b>${esc(veh || 'sin datos')}</b>${noEsp(e.gravedad_siniestro) ? ' · <b>' + esc(tit(e.gravedad_siniestro)) + '</b>' : ''}</div>
-      ${noEsp(e.resumen) ? `<div class="notg-extra">${esc(e.resumen)}</div>` : ''}
-      ${dup ? `<div class="notg-dup-msg">⚠️ Coincide con el registro <b>${esc(n.duplicado_id)}</b> — se sugiere fusionar en lugar de crear una fila nueva.</div>` : ''}
-      ${n._incorporado
-        ? `<div class="notg-meta" style="margin-top:8px">Guardado como <b>${esc(n._incorporado)}</b></div>`
-        : n._editando
-          ? formNoticia(n, i)
-          : `<button class="notg-incorporar" data-idx="${i}">➕ Incorporar al Dataset</button>`}
-    </div>`;
-  }).join('');
-}
-
-// Catálogos del mini formulario inline (mismos valores que el modal de reporte)
+// Catálogos del formulario de confirmación (mismos valores que el modal de reporte)
 const NF_MODOS = [['MOTO', 'Moto'], ['AUTO', 'Auto'], ['CAMIONETA', 'Camioneta'],
   ['BICICLETA', 'Bicicleta'], ['PEATON', 'Peatón'], ['COLECTIVO', 'Colectivo'], ['CAMION', 'Camión']];
 const NF_CONTRAPARTES = [['AUTO', 'Auto'], ['MOTO', 'Moto'], ['CAMIONETA', 'Camioneta'],
   ['CAMION', 'Camión'], ['COLECTIVO', 'Colectivo'], ['BICICLETA', 'Bicicleta'],
   ['PEATON', 'Peatón'], ['OBJETO FIJO / COLUMNA', 'Objeto fijo / Columna'], ['NINGUNO', 'Ninguno']];
-const NF_GRAVEDADES = [['LEVE', 'Leve'], ['GRAVE', 'Grave'], ['SOLO DAÑOS', 'Solo daños']];
-const NF_JURS = ['Perico', 'Monterrico', 'El Carmen', 'San Salvador de Jujuy'];
-
 const nfOpts = (pares, sel) =>
   pares.map(([v, l]) => `<option value="${v}"${v === sel ? ' selected' : ''}>${l}</option>`).join('');
 
-// Mini formulario embebido en la tarjeta: la IA prellena y el usuario
-// corrige sin que se abra el modal flotante del mapa encima de la pestaña.
-function formNoticia(n, i) {
-  const e = n.extraido || {}, g = n.geo || {};
-  const jur = NF_JURS.includes(e.ciudad) ? e.ciudad
-    : (NF_JURS.includes(selJur.value) ? selJur.value : 'Perico');
-  const geoTxt = g.lat
-    ? `${(+g.lat).toFixed(5)}, ${(+g.lon).toFixed(5)} · ${g.nombre || 'estimado'} (${g.fuente || '—'})`
-    : 'sin georreferencia: se ubicará en el centro de la jurisdicción elegida';
-  return `<div class="notg-form">
-    <div class="nf-fila">
-      <div><span class="nf-lbl">Calle / Arteria *</span>
-        <input type="text" id="nf-calle1-${i}" value="${esc(noEsp(e.calle_1))}" placeholder="Ej: Canónigo Gorriti"></div>
-      <div><span class="nf-lbl">Cruce con</span>
-        <input type="text" id="nf-calle2-${i}" value="${esc(noEsp(e.calle_2))}" placeholder="Opcional"></div>
-    </div>
-    <div class="nf-fila">
-      <div><span class="nf-lbl">Fecha</span>
-        <input type="date" id="nf-fecha-${i}" value="${esc(noEsp(e.fecha_aprox))}"></div>
-      <div><span class="nf-lbl">Hora</span>
-        <input type="time" id="nf-hora-${i}" value="${esc(noEsp(e.hora_aprox))}"></div>
-      <div><span class="nf-lbl">Jurisdicción</span>
-        <select id="nf-jur-${i}">${NF_JURS.map((j) => `<option${j === jur ? ' selected' : ''}>${j}</option>`).join('')}</select></div>
-    </div>
-    <div class="nf-fila">
-      <div><span class="nf-lbl">Vehículo víctima</span>
-        <select id="nf-modo-${i}">${nfOpts(NF_MODOS, noEsp(e.modo_desplazamiento_victima) || 'MOTO')}</select></div>
-      <div><span class="nf-lbl">Contraparte</span>
-        <select id="nf-contra-${i}">${nfOpts(NF_CONTRAPARTES, noEsp(e.contraparte_siniestro) || 'AUTO')}</select></div>
-      <div><span class="nf-lbl">Gravedad</span>
-        <select id="nf-grav-${i}">${nfOpts(NF_GRAVEDADES, noEsp(e.gravedad_siniestro) || 'LEVE')}</select></div>
-    </div>
-    <div class="nf-acciones">
-      <button class="notg-cancelar" data-idx="${i}">✕</button>
-      <button class="notg-guardar" data-idx="${i}">💾 Guardar</button>
-    </div>
-    <div class="nf-geo">📍 ${esc(geoTxt)}</div>
-  </div>`;
+// Marcador pulsante temporal para verificar el punto antes de incorporar
+let markerPulsoNoticia = null;
+let pulsoNoticiaTimer = null;
+
+/* ---------- Ingesta Rápida de Noticia: un solo campo, detección
+   automática de URL vs texto ---------- */
+let npPicking = false;
+let npUrlIngerida = '';   // link origen cuando la entrada fue una URL
+const npGeoTxt = () => $('np-geo-txt');
+
+const NP_ESTADOS = [['ILESO', 'Ileso'], ['LEVE', 'Leve'],
+  ['GRAVE', 'Grave'], ['FATAL', 'Fatal']];
+// El dataset guarda LEVE/GRAVE/SOLO DAÑOS: 'Ileso' implica solo danos y
+// 'Fatal' se registra como siniestro grave.
+const NP_ESTADO_A_GRAVEDAD = { ILESO: 'SOLO DAÑOS', LEVE: 'LEVE',
+  GRAVE: 'GRAVE', FATAL: 'GRAVE' };
+
+// Llenado del formulario unificado con la extraccion forense de
+// /api/extraer-nota-completa o /api/extraer-nota-url.
+function npLlenarFormulario(x) {
+  if ([...$('np-jur').options].some((o) => o.value === x.jurisdiccion)) {
+    $('np-jur').value = x.jurisdiccion;
+  }
+  $('np-c1').value = x.arteria_principal || '';
+  $('np-c2').value = x.arteria_secundaria || x.referencia_local || '';
+  $('np-v1').innerHTML = nfOpts(NF_MODOS, x.vehiculo_1 || 'AUTO');
+  $('np-v2').innerHTML = nfOpts(NF_CONTRAPARTES, x.vehiculo_2 || 'NINGUNO');
+  $('np-victimas').value =
+    Number.isFinite(+x.victimas_cantidad) ? +x.victimas_cantidad : 1;
+  $('np-estado').innerHTML =
+    nfOpts(NP_ESTADOS, x.victimas_estado || 'LEVE');
+  $('np-resumen').value = x.resumen || '';
+  $('np-fecha').value = x.fecha_siniestro || '';
+  $('np-lat').value = x.lat != null ? (+x.lat).toFixed(6) : '';
+  $('np-lon').value = x.lon != null ? (+x.lon).toFixed(6) : '';
+  npGeoTxt().textContent = x.lat != null
+    ? `📍 ${(+x.lat).toFixed(5)}, ${(+x.lon).toFixed(5)} · ${x.geo_nombre || ''} (${x.geo_fuente})`
+    : '📍 Sin coordenadas: ajustá el punto en el mapa';
+  npGeoTxt().className = 'np-geo ' + (x.lat != null ? 'ok' : 'warn');
+  $('np-form').hidden = false;
 }
 
-// Incorporación directa desde la tarjeta: "➕ Incorporar" despliega el
-// mini formulario inline prellenado por la IA; "💾 Guardar" persiste en
-// /api/reportar sin abrir el modal flotante del mapa.
-$('noticias-lista').addEventListener('click', async (e) => {
-  const btnGuardar = e.target.closest('.notg-guardar');
-  const btnCancelar = e.target.closest('.notg-cancelar');
-  const btnIncorporar = e.target.closest('.notg-incorporar');
-  if (!btnGuardar && !btnCancelar && !btnIncorporar) return;
-  const idx = +(btnGuardar || btnCancelar || btnIncorporar).dataset.idx;
-  const n = noticiasBandeja[idx];
-  if (!n) return;
+// Fallback: mapea la extraccion canonica del escaner (calle_1/calle_2/
+// ciudad/gravedad_siniestro) al mismo formulario cuando la URL de la
+// tarjeta no se pudo descargar.
+function npLlenarDesdeCanon(e, geo) {
+  const estado = { 'SOLO DAÑOS': 'ILESO', 'LEVE': 'LEVE',
+    'GRAVE': 'GRAVE', 'FATAL': 'FATAL' }[e.gravedad_siniestro] || 'LEVE';
+  npLlenarFormulario({
+    jurisdiccion: noEsp(e.jurisdiccion_confirmada) || noEsp(e.ciudad) || '',
+    arteria_principal: noEsp(e.calle_1),
+    arteria_secundaria: noEsp(e.calle_2),
+    referencia_local: noEsp(e.referencia_paraje),
+    vehiculo_1: noEsp(e.modo_desplazamiento_victima) || 'AUTO',
+    vehiculo_2: noEsp(e.contraparte_siniestro) || 'NINGUNO',
+    victimas_cantidad: 1,
+    victimas_estado: estado,
+    resumen: noEsp(e.resumen),
+    lat: geo && geo.lat != null ? +geo.lat : null,
+    lon: geo && geo.lon != null ? +geo.lon : null,
+    geo_nombre: (geo && geo.nombre) || '',
+    geo_fuente: (geo && geo.fuente) || '',
+  });
+}
 
-  if (btnIncorporar) {
-    n._editando = true;
-    renderBandeja();
+async function analizarNotaCompleta() {
+  const entrada = $('np-entrada').value.trim();
+  const esUrl = /^https?:\/\/\S+$/i.test(entrada);
+  if (!entrada) {
+    toast('Pegá el enlace o el texto completo de la noticia', true);
     return;
   }
-  if (btnCancelar) {
-    n._editando = false;
-    renderBandeja();
+  if (!esUrl && entrada.length < 40) {
+    toast('Pegá el cuerpo completo de la noticia o su enlace', true);
     return;
   }
+  npUrlIngerida = esUrl ? entrada : '';
+  const btn = $('btn-extraer-nota');
+  btn.disabled = true;
+  btn.textContent = esUrl
+    ? '🧠 Descargando y analizando…' : '🧠 Analizando con IA…';
+  try {
+    const r = await fetch(
+      esUrl ? '/api/extraer-nota-url' : '/api/extraer-nota-completa', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(esUrl ? { url: entrada } : { texto: entrada }),
+      });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.mensaje || 'Error del servidor');
+    npLlenarFormulario(d.extraido || {});
+    if (d.url_final) npUrlIngerida = d.url_final;
+    $('notg-status').innerHTML =
+      'Extracción por <b>Gemini IA</b> lista — revisá los datos y confirmá.';
+  } catch (err) {
+    toast(`✖ ${err.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🧠 Analizar con IA';
+  }
+}
+$('btn-extraer-nota').addEventListener('click', analizarNotaCompleta);
 
-  const ext = n.extraido || {};
-  const inputCalle = $(`nf-calle1-${idx}`);
-  const calle_1 = inputCalle.value.trim();
-  if (!calle_1) {
-    inputCalle.classList.add('nf-error');
-    inputCalle.focus();
+/* ---------- Monitor: pestañas Escaneo Automático / Pegar Noticia ---------- */
+let noticiasScan = [];
+
+function mnSetTab(m) {
+  $('mt-tab-scan').classList.toggle('activa', m === 'scan');
+  $('mt-tab-paste').classList.toggle('activa', m === 'paste');
+  $('mt-pane-scan').hidden = m !== 'scan';
+  $('mt-pane-paste').hidden = m !== 'paste';
+}
+$('mt-tab-scan').addEventListener('click', () => mnSetTab('scan'));
+$('mt-tab-paste').addEventListener('click', () => mnSetTab('paste'));
+
+// "🌐 Escanear Noticias": consulta Google News/RSS en el servidor y
+// pinta las tarjetas encontradas con medio + fecha.
+$('btn-escanear').addEventListener('click', async () => {
+  const btn = $('btn-escanear');
+  btn.disabled = true;
+  $('notg-status').innerHTML =
+    'Escaneando Google News… <i>puede demorar unos segundos</i>';
+  try {
+    const res = await fetch('/api/buscar-noticias-google?'
+      + new URLSearchParams({
+          zona: $('notg-zona').value,
+          periodo: $('notg-periodo').value,
+        }));
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
+    noticiasScan = d.noticias || [];
+    renderScan();
+    $('notg-status').innerHTML =
+      `<b>${d.total}</b> titulares viales analizados con <b>${d.fuente === 'gemini' ? 'Gemini IA' : 'reglas locales'}</b>` +
+      ` · zona <b>${esc(d.zona)}</b> · ${esc(d.periodo)}` +
+      (d.descartados ? ` · <b>${d.descartados}</b> filtrados` : '') +
+      (d.descartados_jurisdiccion ? ` · <b>${d.descartados_jurisdiccion}</b> descartados por jurisdicción` : '');
+  } catch (err) {
+    $('notg-status').textContent = `✖ ${err.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function renderScan() {
+  const cont = $('mn-lista');
+  if (!noticiasScan.length) {
+    cont.innerHTML = '<div class="mn-vacio">Sin resultados — ajustá la zona o el período y escaneá de nuevo.</div>';
     return;
   }
-  const jur = $(`nf-jur-${idx}`).value;
-  const g = n.geo || {};
-  let lat = +g.lat, lon = +g.lon;
+  cont.innerHTML = noticiasScan.map((n, i) => {
+    const fecha = String(n.fecha_pub || '').slice(0, 10) || 's/f';
+    return `<div class="mn-card">
+      <div class="mn-card-tit">${n.url
+        ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.titulo)}</a>`
+        : esc(n.titulo)}</div>
+      <div class="mn-card-meta">🗞️ <b>${esc(n.medio || 'Desconocido')}</b> · ${esc(fecha)}${n.es_duplicado ? ' · ⚠️ posible duplicado' : ''}</div>
+      <button class="mn-analizar" data-idx="${i}" ${n._leyendo ? 'disabled' : ''}>
+        ${n._leyendo ? '⏳ Analizando…' : '📖 Analizar y Georreferenciar'}</button>
+    </div>`;
+  }).join('');
+}
+
+$('mn-lista').addEventListener('click', (e) => {
+  const b = e.target.closest('.mn-analizar');
+  if (b) mnAnalizarNoticia(+b.dataset.idx);
+});
+
+// "📖 Analizar y Georreferenciar": descarga el CUERPO real de la nota
+// (el servidor resuelve el redirect de Google News) y vuelca la
+// extraccion forense al formulario unificado. Si la descarga falla,
+// precarga lo que el escaner ya extrajo del titular.
+async function mnAnalizarNoticia(idx) {
+  const n = noticiasScan[idx];
+  if (!n || n._leyendo) return;
+  n._leyendo = true;
+  renderScan();
+  try {
+    const r = await fetch('/api/analizar-url', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: n.url, titulo: n.titulo }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.mensaje || 'Error del servidor');
+    npLlenarFormulario(d.extraido || {});
+    npUrlIngerida = d.url_final || n.url || '';
+    if (n.medio) $('np-fuente').value = n.medio;
+    $('notg-status').innerHTML =
+      `📖 <b>${esc(n.medio || 'Nota')}</b> analizada — revisá y confirmá.`;
+  } catch (err) {
+    if (n.extraido) {
+      npLlenarDesdeCanon(n.extraido, n.geo);
+      npUrlIngerida = n.url || '';
+      if (n.medio) $('np-fuente').value = n.medio;
+      $('notg-status').innerHTML =
+        '⚠️ No se pudo leer el cuerpo: precargado el análisis del titular.';
+    } else {
+      toast(`✖ ${err.message}`, true);
+    }
+  } finally {
+    n._leyendo = false;
+    renderScan();
+  }
+}
+
+// "🗺️ Ver en el mapa": vuela al punto detectado con marcador pulsante
+// temporal para inspeccionar el lugar antes de confirmar.
+$('np-vermapa').addEventListener('click', () => {
+  const lat = parseFloat($('np-lat').value);
+  const lon = parseFloat($('np-lon').value);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-    // Sin georreferencia: centro de la jurisdicción elegida en el form.
-    const c = (MUNICIPIOS[jur] || MUNICIPIOS['Perico']).center;
-    [lon, lat] = c;
+    toast('Sin coordenadas: fijá el punto con 📍 Ajustar en el mapa', true);
+    return;
   }
-  btnGuardar.disabled = true;
+  setTab('mapa');
+  map.flyTo({ center: [lon, lat], zoom: 16.5, pitch: 40,
+    essential: true, duration: 1800 });
+  if (markerPulsoNoticia) { markerPulsoNoticia.remove(); markerPulsoNoticia = null; }
+  const el = document.createElement('div');
+  el.className = 'pulso-noticia';
+  el.innerHTML = '<div class="pulso-onda"></div><div class="pulso-nucleo"></div>';
+  markerPulsoNoticia = new maplibregl.Marker({ element: el, anchor: 'center' })
+    .setLngLat([lon, lat]).addTo(map);
+  clearTimeout(pulsoNoticiaTimer);
+  pulsoNoticiaTimer = setTimeout(() => {
+    if (markerPulsoNoticia) { markerPulsoNoticia.remove(); markerPulsoNoticia = null; }
+  }, 12000);
+});
+
+// "📍 Ajustar en Mapa": va a Mapa & GPS y el próximo clic fija el punto.
+$('np-mapbtn').addEventListener('click', () => {
+  npPicking = true;
+  setTab('mapa');
+  const aviso = $('aviso-mapa');
+  aviso.innerHTML = `<span class="pulso"></span>
+    Hacé clic en el punto exacto del siniestro pegado`;
+  aviso.classList.add('visible');
+  map.getCanvas().style.cursor = 'crosshair';
+});
+
+function npCapturarPunto(lngLat) {
+  npPicking = false;
+  map.getCanvas().style.cursor = '';
+  const aviso = $('aviso-mapa');
+  aviso.classList.remove('visible');
+  $('np-lat').value = (+lngLat.lat).toFixed(6);
+  $('np-lon').value = (+lngLat.lng).toFixed(6);
+  npGeoTxt().textContent =
+    `📍 ${(+lngLat.lat).toFixed(5)}, ${(+lngLat.lng).toFixed(5)} · manual`;
+  npGeoTxt().className = 'np-geo ok';
+  // Pin temporal de verificacion sobre el mapa.
+  const el = document.createElement('div');
+  el.className = 'pulso-noticia';
+  el.innerHTML = '<div class="pulso-onda"></div><div class="pulso-nucleo"></div>';
+  const mk = new maplibregl.Marker({ element: el, anchor: 'center' })
+    .setLngLat([lngLat.lng, lngLat.lat]).addTo(map);
+  setTimeout(() => mk.remove(), 9000);
+  toast('Punto fijado — volvé a la nota y confirmá');
+  setTab('noticias');
+}
+
+async function guardarNotaCompleta() {
+  const lat = parseFloat($('np-lat').value);
+  const lon = parseFloat($('np-lon').value);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    toast('Ajustá las coordenadas (📍 Ajustar en Mapa)', true);
+    return;
+  }
+  const c1 = $('np-c1').value.trim();
+  if (!c1) { toast('Indicá la arteria principal', true); return; }
+  const btn = $('np-guardar');
+  btn.disabled = true;
   try {
     const res = await fetch('/api/reportar', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        jurisdiccion: jur,
-        calle_1,
-        calle_2: $(`nf-calle2-${idx}`).value.trim(),
-        fecha_siniestro: $(`nf-fecha-${idx}`).value,
-        hora_siniestro: $(`nf-hora-${idx}`).value,
-        modo_desplazamiento_victima: $(`nf-modo-${idx}`).value,
-        contraparte_siniestro: $(`nf-contra-${idx}`).value || 'NINGUNO',
-        gravedad_siniestro: $(`nf-grav-${idx}`).value,
-        edad_victima: ext.edad_victima || '',
-        total_victimas: 1,
-        descripcion: (noEsp(ext.resumen) || n.titulo) + ' [monitor de prensa]',
-        latitud_siniestro: lat,
-        longitud_siniestro: lon,
+        jurisdiccion: $('np-jur').value,
+        calle_1: c1, calle_2: $('np-c2').value.trim(),
+        modo_desplazamiento_victima: $('np-v1').value,
+        contraparte_siniestro: $('np-v2').value || 'NINGUNO',
+        gravedad_siniestro:
+          NP_ESTADO_A_GRAVEDAD[$('np-estado').value] || 'LEVE',
+        fecha_siniestro: $('np-fecha').value || '',
+        total_victimas:
+          Math.max(0, parseInt($('np-victimas').value, 10) || 0) || 1,
+        descripcion: ($('np-resumen').value || 'Ingesta manual')
+          + ' [monitor de prensa]',
+        resumen_contexto: $('np-resumen').value || '',
+        medio_prensa: $('np-fuente').value || 'Otro',
+        url_noticia: npUrlIngerida,
+        latitud_siniestro: lat, longitud_siniestro: lon,
       }),
     });
     const d = await res.json();
     if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
-    n._incorporado = d.id;
-    n._editando = false;
-    renderBandeja();
-    toast('✅ Siniestro incorporado al dataset oficial');
+    $('np-form').hidden = true;
+    $('np-entrada').value = '';
+    npUrlIngerida = '';
+    $('notg-status').innerHTML =
+      `✅ Guardado como <b>${esc(d.id || 'nuevo registro')}</b> en el dataset`;
+    toast('✅ ¡Siniestro incorporado exitosamente al Observatorio!');
     await actualizarDatos();
   } catch (err) {
     toast(`✖ ${err.message}`, true);
-    btnGuardar.disabled = false;
-  }
-});
-
-$('btn-escanear').addEventListener('click', async () => {
-  const btn = $('btn-escanear');
-  btn.disabled = true;
-  $('notg-status').innerHTML = 'Escaneando Google News… <i>puede demorar unos segundos</i>';
-  try {
-    const res = await fetch('/api/buscar-noticias-google?' + new URLSearchParams({
-      zona: $('notg-zona').value,
-      periodo: $('notg-periodo').value,
-    }));
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
-    noticiasBandeja = d.noticias;
-    renderBandeja();
-    $('notg-status').innerHTML =
-      `<b>${d.total}</b> titulares viales analizados con <b>${d.fuente === 'gemini' ? 'Gemini IA' : 'reglas locales'}</b>` +
-      ` · zona <b>${esc(d.zona)}</b> · ${esc(d.periodo)}` +
-      (d.descartados ? ` · <b>${d.descartados}</b> filtrados (necrológicas / no viales)` : '');
-  } catch (err) {
-    $('notg-status').textContent = `✖ ${err.message}`;
   } finally {
     btn.disabled = false;
   }
-});
+}
+$('np-guardar').addEventListener('click', guardarNotaCompleta);
 
-$('btn-analizar-noticia').addEventListener('click', async () => {
-  const texto = $('notg-texto').value.trim();
-  const url = $('notg-url').value.trim();
-  if (!texto && !url) {
-    $('notg-status').textContent = 'Pegá el texto de la noticia o su enlace.';
+/* ---------- Buscador permanente del mapa ---------- */
+let markerBusq = null;
+let mapaBusqTimer = null;
+let mapaBusqSugs = [];
+let mbSel = -1;;
+
+function ponerPinBusq(lon, lat) {
+  if (markerBusq) { markerBusq.remove(); markerBusq = null; }
+  const el = document.createElement('div');
+  el.className = 'pulso-noticia';
+  el.innerHTML = '<div class="pulso-onda"></div><div class="pulso-nucleo"></div>';
+  markerBusq = new maplibregl.Marker({ element: el, anchor: 'center' })
+    .setLngLat([lon, lat]).addTo(map);
+}
+
+// Trazar la arteria elegida en la capa 'arteria' (misma del ranking):
+// resalta la calle completa sobre el mapa, no solo el punto medio.
+async function resaltarArteriaMapa(nombre, jur) {
+  try {
+    const base = nombre.split(' y ')[0].split(' esq ')[0].trim();
+    const res = await fetch('/api/geometria-calle?nombre='
+      + encodeURIComponent(base)
+      + '&jurisdiccion=' + encodeURIComponent(jur || selJur.value || 'TODOS'));
+    const d = await res.json();
+    if (res.ok && d.features?.length && map.getSource('arteria')) {
+      map.getSource('arteria').setData(d);
+    }
+  } catch { /* resaltado opcional */ }
+}
+
+// Rutas provinciales/nacionales indexadas en el buscador: "41", "RP 46",
+// "Ruta Nacional 66", etc. despliegan sugerencia directa sobre la traza.
+const RUTAS_BUSQ = [
+  { nombre: 'Ruta Provincial 1 (RP 1)',
+    keys: ['1', 'rp 1', 'ruta 1', 'ruta provincial 1'],
+    lat: -24.2600, lon: -64.9800 },
+  { nombre: 'Ruta Provincial 41 (RP 41 - Empalme Lobatón / Rodeíto)',
+    keys: ['41', 'rp 41', 'ruta 41', 'ruta provincial 41'],
+    lat: -24.39366, lon: -64.84887 },
+  { nombre: 'Ruta Provincial 46 (RP 46 - Perico / Monterrico)',
+    keys: ['46', 'rp 46', 'ruta 46', 'ruta provincial 46'],
+    lat: -24.4020, lon: -65.1580 },
+  { nombre: 'Ruta Provincial 42 (RP 42 - Monterrico / El Carmen)',
+    keys: ['42', 'rp 42', 'ruta 42', 'ruta provincial 42'],
+    lat: -24.4310, lon: -65.1850 },
+  { nombre: 'Ruta Nacional 66 (RN 66)',
+    keys: ['66', 'rn 66', 'ruta 66', 'ruta nacional 66'],
+    lat: -24.2850, lon: -65.1800 },
+  { nombre: 'Ruta Nacional 34 (RN 34)',
+    keys: ['34', 'rn 34', 'ruta 34', 'ruta nacional 34'],
+    lat: -24.2400, lon: -64.8600 },
+  { nombre: 'Ruta Nacional 9 (RN 9)',
+    keys: ['9', 'rn 9', 'ruta 9', 'ruta nacional 9'],
+    lat: -24.1500, lon: -65.3350 },
+];
+
+async function sugerirMapaBusq() {
+  const q = $('mapa-busq').value.trim();
+  const lista = $('mapa-ac');
+  if (q.length < 2) { lista.hidden = true; mapaBusqSugs = []; return; }
+  const jur = selJur.value || 'TODOS';
+  const qn = q.toLowerCase();
+  const rutas = RUTAS_BUSQ.filter((r) => r.keys.some(
+    (k) => qn === k || qn.includes(k) || k.includes(qn)))
+    .map((r) => ({ nombre: r.nombre, lat: r.lat, lon: r.lon,
+                   fuente: 'local', _ruta: true }));
+  try {
+    const [resCalle, resPlaces] = await Promise.all([
+      fetch('/api/buscar-calle?q=' + encodeURIComponent(q)
+        + '&jurisdiccion=' + encodeURIComponent(jur)),
+      fetch('/api/places-autocomplete?q=' + encodeURIComponent(q)),
+    ]);
+    const d = await resCalle.json();
+    const places = (await resPlaces.json() || []).slice(0, 5).map((p) => ({
+      nombre: p.descripcion_completa || p.titulo,
+      titulo: p.titulo, subtitulo: p.subtitulo || '',
+      place_id: p.place_id, fuente: 'google',
+      lat: p.lat, lon: p.lon,
+    }));
+    mapaBusqSugs = [...rutas, ...places,
+                    ...(d.sugerencias || [])].slice(0, 8);
+    lista.innerHTML = mapaBusqSugs.map((s, i) =>
+      `<li data-i="${i}"><span class="nombre">${s.fuente === 'google' ? '📍 ' : ''}` +
+      `<b>${esc(s.titulo || s.nombre)}</b>` +
+      (s.subtitulo ? `<br><small style="color:#7d92ad">${esc(s.subtitulo)}</small>` : '') +
+      `</span><span class="tipo ${s.fuente === 'local' ? 'calle' : 'lugar'}">` +
+      `${s.fuente === 'google' ? 'Google Maps' : (s.fuente === 'local' ? 'calle' : 'Google')}</span></li>`
+    ).join('') ||
+      '<li class="notg-ac-vacia">Sin coincidencias en la zona…</li>';
+    mbSel = -1;
+    lista.hidden = !mapaBusqSugs.length;
+  } catch { lista.hidden = true; }
+}
+
+// Eleccion en el buscador (clic o Enter): volar a 17/pitch45, clavar el
+// pin, resaltar la arteria y —si hay noticia pendiente— pedir confirmar.
+async function elegirMapaBusq(i) {
+  const s = mapaBusqSugs[i];
+  $('mapa-ac').hidden = true;
+  const consulta = (s && s.nombre) || $('mapa-busq').value.trim();
+  if (s) $('mapa-busq').value = s.nombre;
+  // Rutas indexadas: coordenada curada propia (no re-consultar).
+  if (s && s._ruta) {
+    map.flyTo({ center: [s.lon, s.lat], zoom: 16, pitch: 45, duration: 1400 });
+    ponerPinBusq(s.lon, s.lat);
+    resaltarArteriaMapa(s.nombre, selJur.value);
     return;
   }
-  const btn = $('btn-analizar-noticia');
-  btn.disabled = true;
-  $('notg-status').textContent = 'Analizando la crónica con IA…';
+  // Google Maps via backend: prioridad absoluta.
   try {
-    const res = await fetch('/api/procesar-noticia', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ texto, url }),
-    });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
-    const e = d.extraido;
-    noticiasBandeja.unshift({
-      id: 'manual-' + Date.now(),
-      titulo: e.resumen !== 'NO ESPECIFICADO' ? e.resumen
-        : texto.slice(0, 110) + (texto.length > 110 ? '…' : ''),
-      medio: 'Ingreso manual',
-      url,
-      fecha_pub: noEsp(e.fecha_aprox),
-      extraido: e,
-      geo: d.geo,
-      es_duplicado: d.es_duplicado,
-      duplicado_id: d.duplicado_id,
-    });
-    renderBandeja();
-    $('notg-status').innerHTML =
-      `Análisis por <b>${d.fuente === 'gemini' ? 'Gemini IA' : 'reglas locales'}</b> listo — ` +
-      'revisá la tarjeta antes de incorporar.';
-  } catch (err) {
-    $('notg-status').textContent = `✖ ${err.message}`;
-  } finally {
-    btn.disabled = false;
+    if (s && s.lat != null && s.lon != null) {
+      map.flyTo({ center: [s.lon, s.lat], zoom: 17, pitch: 45, duration: 1400 });
+      ponerPinBusq(s.lon, s.lat);
+      resaltarArteriaMapa(consulta, selJur.value);
+      return;
+    }
+    const r = await fetch(s && s.place_id
+      ? '/api/place-coordenadas?place_id=' + encodeURIComponent(s.place_id)
+      : s && s.fuente === 'google'
+        ? '/api/place-coordenadas?address=' + encodeURIComponent(consulta)
+        : '/api/buscar-direccion?q=' + encodeURIComponent(consulta)
+          + '&jurisdiccion=' + encodeURIComponent(selJur.value || ''));
+    const d = await r.json();
+    if (d.status === 'OK') {
+      map.flyTo({ center: [d.lon, d.lat], zoom: 17, pitch: 45, duration: 1400 });
+      ponerPinBusq(d.lon, d.lat);
+      resaltarArteriaMapa(consulta, selJur.value);
+      return;
+    }
+  } catch { /* cae al catalogo local */ }
+  if (s) {
+    map.flyTo({ center: [s.lon, s.lat], zoom: 17, pitch: 45, duration: 1400 });
+    ponerPinBusq(s.lon, s.lat);
+    resaltarArteriaMapa(s.nombre, selJur.value);
   }
+}
+
+// Listeners del buscador permanente del mapa.
+$('mapa-busq').addEventListener('input', () => {
+  clearTimeout(mapaBusqTimer);
+  mapaBusqTimer = setTimeout(sugerirMapaBusq, 220);
+});
+$('mapa-busq').addEventListener('keydown', (e) => {
+  if (!mapaBusqSugs.length) return;
+  if (e.key === 'Enter') { e.preventDefault(); elegirMapaBusq(mbSel >= 0 ? mbSel : 0); }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    mbSel = (mbSel + (e.key === 'ArrowDown' ? 1 : -1)
+             + mapaBusqSugs.length) % mapaBusqSugs.length;
+    [...$('mapa-ac').children].forEach((li, i) =>
+      li.classList.toggle('sel', i === mbSel));
+    const el = $('mapa-ac').children[mbSel];
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }
+});
+$('mapa-ac').addEventListener('mousedown', (e) => {
+  const li = e.target.closest('li[data-i]');
+  if (!li) return;
+  e.preventDefault();
+  elegirMapaBusq(+li.dataset.i);
+});
+$('mapa-busq').addEventListener('focusout', () => {
+  setTimeout(() => { $('mapa-ac').hidden = true; }, 180);
 });
 
 /* ---------- Radar preventivo de riesgo ---------- */
@@ -2605,7 +3069,7 @@ async function buscarSugerencias(clave, q) {
   try {
     const u = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=4' +
       '&countrycodes=ar&accept-language=es&viewbox=' + NOMINATIM_VIEWBOX +
-      '&q=' + encodeURIComponent(`${q}, ${selJur.value}, Jujuy, Argentina`);
+      '&q=' + encodeURIComponent(`${q}, ${['Perico', 'Monterrico', 'El Carmen', 'Palpalá', 'San Pedro de Jujuy', 'San Salvador de Jujuy'].includes(selJur.value) ? selJur.value : 'Jujuy'}, Argentina`);
     const d = await (await fetch(u)).json();
     for (const s of d) {
       const nombre = s.display_name.split(',').slice(0, 2).join(',').trim();
@@ -2808,7 +3272,9 @@ function renderKDD(d) {
 }
 
 /* ----- Copiloto IA (chat) ----- */
-const chatMsgs = $('chat-msgs');
+const chatMsgs = $('chat-msgs');              // chat embebido (pestaña IA)
+const chatPanel = $('chat-panel');            // panel flotante
+const chatPanelMsgs = $('chat-panel-msgs');
 // Hilo completo de la sesión: [{role:'user'|'model', text}] — se envía
 // entero al servidor para que Gemini recuerde la conversación.
 const chatHistory = [];
@@ -2819,10 +3285,16 @@ function saludarChat() {
     'motos o consejos de prevención.', 'reglas');
 }
 
+// El botón flotante abre/cierra el panel superpuesto: queda accesible
+// desde cualquier pestaña sin cambiar de vista.
 $('btn-chat').addEventListener('click', () => {
-  setTab('ml');
-  $('chat-texto').focus();
+  chatPanel.hidden = !chatPanel.hidden;
+  if (!chatPanel.hidden) {
+    if (!chatPanelMsgs.children.length) saludarChat();
+    $('chat-panel-texto').focus();
+  }
 });
+$('chat-panel-cerrar').addEventListener('click', () => { chatPanel.hidden = true; });
 
 document.querySelectorAll('.chat-sugs .sug').forEach((chip) =>
   chip.addEventListener('click', () => {
@@ -2830,29 +3302,31 @@ document.querySelectorAll('.chat-sugs .sug').forEach((chip) =>
     enviarChat();
   }));
 
+// Cada mensaje se dibuja en ambos contenedores (pestaña IA + panel
+// flotante) para que la conversación sea la misma en cualquier vista.
 function agregarMsg(rol, texto, fuente) {
-  const div = document.createElement('div');
-  div.className = `msg ${rol}`;
-  div.textContent = texto;
-  if (fuente) {
-    const f = document.createElement('span');
-    f.className = 'fuente';
-    f.textContent = fuente === 'gemini' ? '✦ Gemini' : '⚙ modo local (reglas)';
-    div.appendChild(f);
+  const nodos = [];
+  for (const cont of [chatMsgs, chatPanelMsgs]) {
+    const div = document.createElement('div');
+    div.className = `msg ${rol}`;
+    div.textContent = texto;
+    if (fuente) {
+      const f = document.createElement('span');
+      f.className = 'fuente';
+      f.textContent = fuente === 'gemini' ? '✦ Gemini' : '⚙ modo local (reglas)';
+      div.appendChild(f);
+    }
+    cont.appendChild(div);
+    cont.scrollTop = cont.scrollHeight;
+    nodos.push(div);
   }
-  chatMsgs.appendChild(div);
-  chatMsgs.scrollTop = chatMsgs.scrollHeight;
-  return div;
+  return nodos;
 }
 
-async function enviarChat() {
-  const input = $('chat-texto');
-  const texto = input.value.trim();
-  if (!texto) return;
-  input.value = '';
+async function enviarTextoChat(texto) {
   agregarMsg('user', texto);
   const typing = agregarMsg('ia typing', '…');
-  $('chat-enviar').disabled = true;
+  $('chat-enviar').disabled = $('chat-panel-enviar').disabled = true;
   try {
     const res = await fetch('/api/chat-gemini', {
       method: 'POST',
@@ -2861,47 +3335,162 @@ async function enviarChat() {
     });
     const d = await res.json();
     if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
-    typing.remove();
+    typing.forEach((n) => n.remove());
     agregarMsg('ia', d.respuesta, d.fuente);
-    $('chat-estado').textContent =
-      d.fuente === 'gemini' ? 'Gemini conectado' : 'modo offline';
+    const est = d.fuente === 'gemini' ? 'Gemini conectado' : 'modo offline';
+    $('chat-estado').textContent = est;
+    $('chat-panel-estado').textContent = est;
     chatHistory.push({ role: 'user', text: texto },
                      { role: 'model', text: d.respuesta });
   } catch (err) {
-    typing.remove();
+    typing.forEach((n) => n.remove());
     agregarMsg('ia', `⚠ ${err.message}`, 'reglas');
   } finally {
-    $('chat-enviar').disabled = false;
-    $('chat-texto').focus();
+    $('chat-enviar').disabled = $('chat-panel-enviar').disabled = false;
   }
 }
+
+function enviarChat() {
+  const input = $('chat-texto');
+  const texto = input.value.trim();
+  if (!texto) return;
+  input.value = '';
+  enviarTextoChat(texto).then(() => input.focus());
+}
+
+function enviarChatPanel() {
+  const input = $('chat-panel-texto');
+  const texto = input.value.trim();
+  if (!texto) return;
+  input.value = '';
+  enviarTextoChat(texto).then(() => input.focus());
+}
 $('chat-enviar').addEventListener('click', enviarChat);
+$('chat-panel-enviar').addEventListener('click', enviarChatPanel);
 $('chat-texto').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') enviarChat();
+});
+$('chat-panel-texto').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') enviarChatPanel();
 });
 // 🧹 Nueva charla: limpia burbujas + memoria del hilo y vuelve a saludar
 $('chat-reset').addEventListener('click', () => {
   chatMsgs.innerHTML = '';
+  chatPanelMsgs.innerHTML = '';
   chatHistory.length = 0;
   saludarChat();
   $('chat-texto').focus();
 });
 
-/* ================= MODULO LUDICO: Juego & Mitos ================= */
+/* ================= MODULO LUDICO: Juego & Mitos (modo arcade) ================= */
 const jg = {
+  nombre: '', vidas: 3, jugando: false,
   modo: 'MOTO',
   usadosDesafio: [], usadosTrivia: [],
   okDesafio: 0, totDesafio: 0,
   okTrivia: 0, totTrivia: 0,
+  puntos: 0, racha: 0,
   triviaActual: null,
   dilemaActual: null,
 };
 
+/* ----- HUD: jugador, vidas, puntuacion, racha xN y nivel por puntos ----- */
+const NIVELES_JG = ['Principiante', 'Avanzado', 'Ingeniero Vial'];
+
+// El nivel sube con la puntuacion: 0-299 principiante, 300-699 avanzado,
+// 700+ Ingeniero Vial. Tambien gradua la dificultad de las preguntas.
+function nivelActual() {
+  return jg.puntos >= 700 ? 3 : jg.puntos >= 300 ? 2 : 1;
+}
+const multiplicadorRacha = () => Math.min(Math.max(jg.racha, 1), 3);
+
+function actualizarHUD() {
+  $('jg-jugador').textContent = jg.nombre || '–';
+  $('jg-vidas').textContent =
+    '❤️'.repeat(jg.vidas) + '💔'.repeat(Math.max(0, 3 - jg.vidas));
+  $('jg-puntos').textContent = jg.puntos;
+  $('jg-racha').textContent = 'x' + multiplicadorRacha() +
+    (jg.racha > 3 ? ` (${jg.racha})` : '');
+  const n = nivelActual();
+  $('jg-nivel').textContent = NIVELES_JG[n - 1];
+  $('jg-stat-nivel').className = `jg-stat n${n}`;
+}
+
+/* ----- Flujo arcade: inicio con nombre, vidas y fin del recorrido ----- */
+function mostrarOverlay(cual) {
+  $('jg-overlay').hidden = !cual;
+  $('jg-start-card').hidden = cual !== 'start';
+  $('jg-fin-card').hidden = cual !== 'fin';
+}
+
+function comenzarRecorrido() {
+  jg.nombre = ($('jg-nombre').value || '').trim() || 'Jugador';
+  jg.jugando = true;
+  mostrarOverlay(null);
+  actualizarHUD();
+  cargarTrivia();   // banco de V/F sin repetir para esta partida
+}
+
+function finDelRecorrido() {
+  jg.jugando = false;
+  const best = Math.max(jg.puntos,
+    +(localStorage.getItem('jg_best') || 0));
+  localStorage.setItem('jg_best', best);
+  $('jg-fin-stats').innerHTML =
+    `Jugador: <b>${esc(jg.nombre)}</b><br>` +
+    `Puntaje obtenido: <b>${jg.puntos} pts</b>` +
+    `<span class="jg-fin-nivel">${NIVELES_JG[nivelActual() - 1]} alcanzado</span>` +
+    `Aciertos: ${jg.okDesafio + jg.okTrivia} de ${jg.totDesafio + jg.totTrivia}` +
+    ` · Récord local: <b>${best} pts</b>`;
+  mostrarOverlay('fin');
+}
+
+// "🔄 Volver a Jugar": vidas y marcador a cero + banco nuevo de preguntas
+// (se vacian los 'usados' para que el servidor sortee otra tanda).
+function reiniciarJuego() {
+  Object.assign(jg, {
+    vidas: 3, jugando: true, puntos: 0, racha: 0,
+    usadosDesafio: [], usadosTrivia: [],
+    okDesafio: 0, totDesafio: 0, okTrivia: 0, totTrivia: 0,
+    triviaActual: null, dilemaActual: null,
+  });
+  $('tv-ok').textContent = '0';
+  $('tv-tot').textContent = '0';
+  $('jg-score').textContent = '';
+  $('jg-dilema').hidden = true;
+  $('tv-exp').hidden = true;
+  $('tv-preg').textContent = 'Cargando desafío…';
+  mostrarOverlay(null);
+  actualizarHUD();
+  cargarTrivia();
+}
+
+// Acierto: +100 pts x multiplicador de racha (x1/x2/x3) y sube la racha.
+// Error: reinicia la racha y descuenta 1 vida; con 0 vidas se termina.
+function registrarResultado(acierto, dificultad) {
+  if (acierto) {
+    jg.racha++;
+    jg.puntos += 100 * Math.min(jg.racha, 3);
+  } else {
+    jg.racha = 0;
+    jg.vidas = Math.max(0, jg.vidas - 1);
+  }
+  actualizarHUD();
+  if (jg.vidas <= 0) finDelRecorrido();
+}
+
 async function cargarJuego() {
   juegoCargado = true;
-  cargarTrivia();
+  actualizarHUD();
+  mostrarOverlay('start');
+  $('jg-nombre').focus();
   cargarCuriosidades();
 }
+$('jg-comenzar').addEventListener('click', comenzarRecorrido);
+$('jg-nombre').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') comenzarRecorrido();
+});
+$('jg-reintentar').addEventListener('click', reiniciarJuego);
 
 /* ----- Subpestañas del área interactiva ----- */
 function setSubtabJuego(cual) {
@@ -2913,30 +3502,27 @@ function setSubtabJuego(cual) {
 $('subtab-decisiones').addEventListener('click', () => setSubtabJuego('decisiones'));
 $('subtab-trivia').addEventListener('click', () => setSubtabJuego('trivia'));
 
-/* ----- Sección A: Simulador de decisiones ----- */
-$('jg-iconos').addEventListener('click', (e) => {
-  const b = e.target.closest('.jg-ico');
-  if (!b) return;
-  jg.modo = b.dataset.modo;
-  document.querySelectorAll('.jg-ico').forEach((x) =>
-    x.classList.toggle('activo', x === b));
-});
-
+/* ----- Sección A: Simulador de decisiones (modo universal infinito) ----- */
 async function generarDilema() {
+  if (!jg.jugando) { mostrarOverlay('start'); return; }
   const btn = $('jg-generar');
   btn.disabled = true;
   try {
-    const res = await fetch('/api/desafio-decision', {
+    $('jg-texto').textContent =
+      '🧠 Analizando situación con Gemini…';
+    $('jg-res').hidden = true;
+    $('jg-otra').hidden = true;
+    const res = await fetch('/api/generar-dilema-ia', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        edad: +$('jg-edad').value || 25,
-        modo: jg.modo,
         usados: jg.usadosDesafio,
+        nivel: nivelActual(),
       }),
     });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
+    const pack = await res.json();
+    const d = pack.dilema || pack;
+    if (!res.ok) throw new Error(pack.mensaje || 'Error del servidor');
     jg.usadosDesafio.push(d.id);
     renderDilema(d);
   } catch (err) {
@@ -2952,8 +3538,10 @@ function renderDilema(d) {
   jg.dilemaActual = d;
   const card = $('jg-card');
   card.className = 'jg-card';
+  const dif = Math.min(Math.max(+(d.dificultad || 1), 1), 3);
   $('jg-lugar').textContent = '📍 ' + d.lugar;
-  $('jg-titulo').textContent = d.titulo;
+  $('jg-titulo').innerHTML =
+    `<span class="jg-dif d${dif}">${NIVELES_JG[dif - 1]}</span>` + esc(d.titulo);
   $('jg-texto').textContent = d.situacion;
   const [a, b] = [$('jg-op-a'), $('jg-op-b')];
   a.textContent = '🅰 ' + d.opciones[0].texto;
@@ -2966,7 +3554,7 @@ function renderDilema(d) {
 
 function resolverDilema(i) {
   const d = jg.dilemaActual;
-  if (!d) return;
+  if (!d || !jg.jugando) return;
   const op = d.opciones[i], st = d.stats;
   const [a, b] = [$('jg-op-a'), $('jg-op-b')];
   a.disabled = b.disabled = true;
@@ -2974,6 +3562,7 @@ function resolverDilema(i) {
   $('jg-card').classList.add(op.segura ? 'acierto' : 'fallo');
   jg.totDesafio++;
   if (op.segura) jg.okDesafio++;
+  registrarResultado(!!op.segura, +(d.dificultad || 1));
   $('jg-score').textContent =
     `Decisiones seguras: ${jg.okDesafio}/${jg.totDesafio}`;
   // Si el dilema es nocturno, el contexto se calcula solo con datos de 19-06 h
@@ -2991,9 +3580,10 @@ function resolverDilema(i) {
       ${op.segura ? '✔ Decisión segura' : '✖ Decisión de alto riesgo'}</span>
     <div>Supervivencia estimada: <span class="impacto">${op.impacto}</span></div>
     <div>${op.explicacion}</div>
-    <div class="stats">${statsTxt}<br>
-      Tu rango etario (${st.edad_rango.rango}): ${st.edad_rango.pct_victimas}%
-      de las víctimas · ${st.edad_rango.pct_grave}% de gravedad en ese grupo.</div>`;
+    <div class="stats">${statsTxt}${st.edad_rango
+      ? `<br>Tu rango etario (${st.edad_rango.rango}): ${st.edad_rango.pct_victimas}% ` +
+        `de las víctimas · ${st.edad_rango.pct_grave}% de gravedad en ese grupo.`
+      : ''}</div>`;
   $('jg-res').hidden = false;
   $('jg-otra').hidden = false;
 }
@@ -3002,6 +3592,7 @@ $('jg-op-b').addEventListener('click', () => resolverDilema(1));
 
 /* ----- Sección B: Trivia Mito o Realidad ----- */
 async function cargarTrivia() {
+  if (!jg.jugando) { mostrarOverlay('start'); return; }
   $('tv-preg').textContent = 'Cargando desafío…';
   $('tv-exp').hidden = true;
   $('tv-v').disabled = $('tv-f').disabled = true;
@@ -3009,20 +3600,22 @@ async function cargarTrivia() {
     const res = await fetch('/api/trivia-mitos', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ usados: jg.usadosTrivia }),
+      body: JSON.stringify({ usados: jg.usadosTrivia, nivel: nivelActual() }),
     });
     const d = await res.json();
     if (d.agotado) {
+      // Banco agotado en esta partida: reiniciar 'usados' y seguir —
+      // el flujo es infinito, solo terminan las vidas.
       jg.usadosTrivia = [];
       jg.triviaActual = null;
-      $('tv-preg').textContent =
-        `🏆 ${d.mensaje} ¡Tocá "Siguiente" para reiniciar!`;
-      return;
+      return cargarTrivia();
     }
     if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
     jg.triviaActual = d;
     jg.usadosTrivia.push(d.id);
-    $('tv-preg').textContent = d.pregunta;
+    const dif = Math.min(Math.max(+(d.dificultad || 1), 1), 3);
+    $('tv-preg').innerHTML =
+      `<span><span class="jg-dif d${dif}">${NIVELES_JG[dif - 1]}</span>${esc(d.pregunta)}</span>`;
     $('tv-v').disabled = $('tv-f').disabled = false;
   } catch (err) {
     $('tv-preg').textContent = '⚠ ' + err.message;
@@ -3031,10 +3624,11 @@ async function cargarTrivia() {
 
 function responderTrivia(dijoVerdadero) {
   const t = jg.triviaActual;
-  if (!t) return;
+  if (!t || !jg.jugando) return;
   const acierto = dijoVerdadero === t.es_verdadero;
   jg.totTrivia++;
   if (acierto) jg.okTrivia++;
+  registrarResultado(acierto, +(t.dificultad || 1));
   $('tv-ok').textContent = jg.okTrivia;
   $('tv-tot').textContent = jg.totTrivia;
   $('tv-v').disabled = $('tv-f').disabled = true;

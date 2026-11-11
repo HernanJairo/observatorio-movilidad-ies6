@@ -4507,11 +4507,17 @@ def api_analizar_url():
     if fecha_pub:
         texto_ia = (f"[Fecha de publicación del artículo: "
                     f"{fecha_pub.isoformat()}]\n\n" + texto_ia)
-    ext = _armar_extraccion_nota(texto_ia)
-    if not ext["fecha_siniestro"] and fecha_pub:
-        ext["fecha_siniestro"] = fecha_pub.isoformat()
-    ext["fuente"] = "gemini"
-    return jsonify({"status": "ok", "extraido": ext,
+    try:
+        ext = _armar_extraccion_nota(texto_ia)
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"status": "error",
+                        "mensaje": f"Gemini no respondió: {exc}"}), 502
+    extraido = (ext or {}).get("extraido") or {}
+    if not extraido.get("fecha_siniestro") and fecha_pub:
+        extraido["fecha_siniestro"] = fecha_pub.isoformat()
+    extraido["fuente"] = "gemini"
+    return jsonify({"status": "ok", "extraido": extraido,
                     "url_final": url_final}), 200
 
 
@@ -4673,5 +4679,6 @@ def api_place_coordenadas():
 
 
 if __name__ == "__main__":
-    print("Servidor MODULO 3 en http://localhost:8000")
-    app.run(host="127.0.0.1", port=8000, debug=False)
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Servidor MODULO 3 en http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)

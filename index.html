@@ -166,6 +166,16 @@
     background:rgba(13,20,34,.92);border:1px solid rgba(74,222,128,.5);color:#4ade80;
     backdrop-filter:blur(14px);box-shadow:0 10px 32px rgba(0,0,0,.5);
   }
+  /* Botones flotantes de celular (ocultos en pantallas grandes) */
+  .btn-mov{
+    display:none;position:absolute;bottom:20px;z-index:35;padding:10px 14px;
+    font-size:12px;font-weight:700;border-radius:22px;cursor:pointer;
+    color:var(--txt);background:var(--panel);border:1px solid var(--panel-border);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45);
+  }
+  #btn-filtros-mov{left:12px}
+  #btn-ranking-mov{left:100px}
   #toast.error{border-color:rgba(239,68,68,.55);color:var(--danger)}
   #toast.visible{display:block}
   .maplibregl-popup-content{background:rgba(13,20,34,.92);color:var(--txt);border:1px solid var(--panel-border);border-radius:10px;padding:10px 12px;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
@@ -817,10 +827,60 @@
     @page{margin:11mm}
   }
   @media (max-width:900px){
-    #panel-filtros{width:220px} #panel-alertas{width:240px}
+    /* ----- Barra de pestañas: ocupa todo el ancho, scroll horizontal ----- */
+    #tabs{top:8px;left:8px!important;right:8px;overflow-x:auto;padding:3px;gap:3px}
+    .tab{padding:8px 12px;font-size:.8rem}
+    /* ----- Paneles del mapa: cerrados por defecto, se abren con los
+           botones flotantes 🎛️ / 📊 ----- */
+    body.modo-mapa .btn-mov{display:block}
+    body.filtros-abiertos #btn-filtros-mov,
+    body.alertas-abiertas #btn-ranking-mov{color:var(--accent);border-color:var(--accent)}
+    body.modo-mapa #panel-filtros{display:none}
+    body.modo-mapa #panel-alertas{display:none}
+    body.modo-mapa.filtros-abiertos #panel-filtros{
+      display:block;top:58px;left:8px;right:8px;width:auto;
+      max-height:calc(100% - 150px);z-index:60;
+    }
+    body.modo-mapa.alertas-abiertas #panel-alertas{
+      display:flex;top:58px;left:8px;right:8px;width:auto;
+      max-height:calc(100% - 150px);z-index:60;
+    }
+    /* ----- Buscador y tarjetas centradas del mapa ----- */
+    #mapa-busq-wrap{top:56px;left:8px;right:8px;width:auto;transform:none}
+    #nav-card{top:100px;left:8px;right:8px;min-width:0;width:auto;transform:none}
+    #itin-card{top:140px;left:8px;right:8px;width:auto;transform:none}
+    #aviso-mapa{top:auto;bottom:74px;left:8px;right:8px;transform:none;justify-content:center}
+    /* ----- Paneles de las pestañas (juego/eda/ia/noticias): a pantalla
+           casi completa ----- */
+    #panel-juego,#panel-eda,#panel-ml,#panel-noticias{
+      top:56px;left:8px;right:8px;width:auto;max-width:none;transform:none;
+      max-height:calc(100% - 66px);padding:14px;
+    }
+    /* ----- Grids a una sola columna ----- */
+    .ml-grid,.notg-grid,.kdd-cols,.eda-grid{grid-template-columns:1fr}
+    .eda-kpis{grid-template-columns:repeat(2,1fr);gap:8px}
+    .eda-card{overflow-x:auto}
+    .eda-head h2{font-size:1.15rem}
+    .eda-kpi .k-val{font-size:1.5rem}
+    .eda-filtro{flex-wrap:wrap;gap:8px}
+    .eda-resumen ol{font-size:.95rem}
     .juego-cols{grid-template-columns:1fr}
     .juego-side{border-left:none;padding-left:0;border-top:1px solid var(--panel-border);padding-top:14px}
     .curios{grid-template-columns:repeat(2,1fr)}
+    .jg-hud{grid-template-columns:repeat(2,1fr)}
+    .jg-setup{grid-template-columns:1fr}
+    .jg-opciones{grid-template-columns:1fr}
+    .jg-titulo{font-size:1.1rem}
+    .jg-texto{font-size:1rem}
+    .jg-subtab{padding:10px 8px;font-size:12px}
+    /* ----- Chat: ancho completo ----- */
+    #chat-panel{left:8px;right:8px;bottom:68px;width:auto;max-width:none;max-height:62vh}
+    #btn-chat{bottom:14px;right:12px;padding:10px 15px;font-size:12px}
+    .msg{font-size:.95rem}
+    .chat-embed #chat-msgs{height:300px}
+    /* ----- Modales y avisos ----- */
+    #modal-reporte{left:8px;right:8px;width:auto;transform:translateY(-50%)}
+    #toast{max-width:92vw;text-align:center}
   }
 </style>
 </head>
@@ -834,6 +894,10 @@
   <button id="tab-ml" class="tab">🤖 Copiloto IA &amp; KDD</button>
   <button id="tab-noticias" class="tab">📰 Monitor de Noticias</button>
 </nav>
+
+<!-- Solo celular: abren los paneles de filtros y ranking como overlay -->
+<button id="btn-filtros-mov" class="btn-mov">🎛️ Filtros</button>
+<button id="btn-ranking-mov" class="btn-mov">📊 Datos</button>
 
 <aside class="panel" id="panel-filtros">
   <div class="brand">
@@ -1710,6 +1774,17 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g,
   (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const noEsp = (v) => (!v || v === 'NO ESPECIFICADO' ? '' : v);
 const tit = (s) => String(s || '').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+// Parsea la respuesta de la API tolerando errores del servidor/proxy:
+// si llega HTML (pantalla de error de Render, 500, 502) en vez de JSON,
+// muestra un mensaje entendible en vez de 'Unexpected token <'.
+async function leerJson(res) {
+  const txt = await res.text();
+  try { return JSON.parse(txt); } catch {
+    throw new Error(res.ok
+      ? 'El servidor respondió algo inesperado. Probá de nuevo.'
+      : `El servidor no respondió bien (${res.status}). Probá de nuevo.`);
+  }
+}
 const selJur = $('sel-jurisdiccion'), selModo = $('sel-modo'), selDia = $('sel-dia');
 const hDesde = $('h-desde'), hHasta = $('h-hasta');
 
@@ -1721,6 +1796,17 @@ function paramsActuales() {
   if (+hDesde.value > 0 || +hHasta.value < 24)
     p.set('franja_horaria', `${hDesde.value}-${hHasta.value}`);
   return p;
+}
+
+// Lo que el usuario esta mirando en el mapa: se manda al copiloto para
+// que 'aca', 'esta zona' o 'este horario' tengan contexto sin explicarlo.
+function contextoPantalla() {
+  return {
+    jurisdiccion: selJur.value,
+    modo: selModo.value,
+    franja: `${$('lbl-desde').textContent}-${$('lbl-hasta').textContent}`,
+    dia: selDia.value,
+  };
 }
 
 let fetchSeq = 0;
@@ -3124,10 +3210,14 @@ let metricasCargadas = false;
 let juegoCargado = false;
 
 function setTab(modo) {
+  document.body.classList.toggle('modo-mapa', modo === 'mapa');
   document.body.classList.toggle('modo-ml', modo === 'ml');
   document.body.classList.toggle('modo-juego', modo === 'juego');
   document.body.classList.toggle('modo-eda', modo === 'eda');
   document.body.classList.toggle('modo-noticias', modo === 'noticias');
+  // En celular los paneles del mapa se abren con botones flotantes:
+  // al cambiar de pestaña siempre quedan cerrados.
+  document.body.classList.remove('filtros-abiertos', 'alertas-abiertas');
   ['mapa', 'juego', 'eda', 'ml', 'noticias'].forEach((k) =>
     $(`tab-${k}`).classList.toggle('activo', k === modo));
   if (modo === 'ml' && !metricasCargadas) cargarMetricasML();
@@ -3140,6 +3230,18 @@ $('tab-juego').addEventListener('click', () => setTab('juego'));
 $('tab-eda').addEventListener('click', () => setTab('eda'));
 $('tab-ml').addEventListener('click', () => setTab('ml'));
 $('tab-noticias').addEventListener('click', () => setTab('noticias'));
+
+// Botones flotantes de celular: abren/cierran filtros y ranking como
+// tarjetas superpuestas (en desktop los paneles siempre estan visibles).
+$('btn-filtros-mov').addEventListener('click', () => {
+  document.body.classList.toggle('filtros-abiertos');
+  document.body.classList.remove('alertas-abiertas');
+});
+$('btn-ranking-mov').addEventListener('click', () => {
+  document.body.classList.toggle('alertas-abiertas');
+  document.body.classList.remove('filtros-abiertos');
+});
+document.body.classList.add('modo-mapa');
 
 /* ----- Simulador predictivo ----- */
 const mlHora = $('ml-hora');
@@ -3171,7 +3273,7 @@ $('ml-evaluar').addEventListener('click', async () => {
         edad: +$('ml-edad').value,
       }),
     });
-    const d = await res.json();
+    const d = await leerJson(res);
     if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
 
     const clase = d.nivel_riesgo.toLowerCase()
@@ -3202,7 +3304,7 @@ $('ml-evaluar').addEventListener('click', async () => {
 async function cargarMetricasML() {
   try {
     const res = await fetch('/api/metricas-ml');
-    const d = await res.json();
+    const d = await leerJson(res);
     if (!res.ok) throw new Error(d.mensaje || 'Sin métricas');
     metricasCargadas = true;
     renderKDD(d);
@@ -3331,9 +3433,10 @@ async function enviarTextoChat(texto) {
     const res = await fetch('/api/chat-gemini', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mensaje: texto, historial: chatHistory }),
+      body: JSON.stringify({ mensaje: texto, historial: chatHistory,
+        contexto: contextoPantalla() }),
     });
-    const d = await res.json();
+    const d = await leerJson(res);
     if (!res.ok) throw new Error(d.mensaje || 'Error del servidor');
     typing.forEach((n) => n.remove());
     agregarMsg('ia', d.respuesta, d.fuente);
@@ -3518,9 +3621,10 @@ async function generarDilema() {
       body: JSON.stringify({
         usados: jg.usadosDesafio,
         nivel: nivelActual(),
+        modo: selModo.value === 'Todos' ? 'AUTO' : selModo.value,
       }),
     });
-    const pack = await res.json();
+    const pack = await leerJson(res);
     const d = pack.dilema || pack;
     if (!res.ok) throw new Error(pack.mensaje || 'Error del servidor');
     jg.usadosDesafio.push(d.id);
@@ -3556,13 +3660,15 @@ function resolverDilema(i) {
   const d = jg.dilemaActual;
   if (!d || !jg.jugando) return;
   const op = d.opciones[i], st = d.stats;
+  // El banco usa 'segura' y la IA 'correcta': aceptamos ambas formas.
+  const segura = op.segura ?? op.correcta ?? op.es_correcta;
   const [a, b] = [$('jg-op-a'), $('jg-op-b')];
   a.disabled = b.disabled = true;
-  (i ? b : a).classList.add(op.segura ? 'elegida-segura' : 'elegida-mala');
-  $('jg-card').classList.add(op.segura ? 'acierto' : 'fallo');
+  (i ? b : a).classList.add(segura ? 'elegida-segura' : 'elegida-mala');
+  $('jg-card').classList.add(segura ? 'acierto' : 'fallo');
   jg.totDesafio++;
-  if (op.segura) jg.okDesafio++;
-  registrarResultado(!!op.segura, +(d.dificultad || 1));
+  if (segura) jg.okDesafio++;
+  registrarResultado(!!segura, +(d.dificultad || 1));
   $('jg-score').textContent =
     `Decisiones seguras: ${jg.okDesafio}/${jg.totDesafio}`;
   // Si el dilema es nocturno, el contexto se calcula solo con datos de 19-06 h
@@ -3602,7 +3708,7 @@ async function cargarTrivia() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ usados: jg.usadosTrivia, nivel: nivelActual() }),
     });
-    const d = await res.json();
+    const d = await leerJson(res);
     if (d.agotado) {
       // Banco agotado en esta partida: reiniciar 'usados' y seguir —
       // el flujo es infinito, solo terminan las vidas.

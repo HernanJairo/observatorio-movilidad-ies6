@@ -42,6 +42,7 @@ import joblib
 import pandas as pd
 import requests
 from flask import Flask, jsonify, request, send_file
+from werkzeug.exceptions import HTTPException
 
 RAIZ = Path(__file__).resolve().parent
 sys.path.insert(0, str(RAIZ / "src"))
@@ -60,6 +61,28 @@ RUTA_GEOJSON = RAIZ / "data" / "red_vial_valles.geojson"
 RUTA_INDEX = RAIZ / "index.html"
 
 app = Flask(__name__)
+
+
+@app.errorhandler(Exception)
+def _error_json_api(exc):
+    """Las rutas /api jamas devuelven HTML: el frontend espera JSON.
+
+    Sin esto, cualquier excepcion no capturada (o un 404/500 de Flask o
+    del proxy de Render) llega como '<!doctype html>...' y el fetch del
+    frontend explota con 'Unexpected token <' en vez de mostrar el
+    mensaje real."""
+    if request.path.startswith("/api/"):
+        if isinstance(exc, HTTPException):
+            return jsonify({"status": "error",
+                            "mensaje": exc.name}), exc.code
+        traceback.print_exc()
+        return jsonify({"status": "error",
+                        "mensaje": "error interno del servidor"}), 500
+    if isinstance(exc, HTTPException):
+        return exc
+    traceback.print_exc()
+    return "Error interno del servidor", 500
+
 
 CENTROS_MUNICIPIOS = {
     "PERICO": (-24.377, -65.117),
@@ -1349,6 +1372,15 @@ def api_predecir():
         proba = float(pipe.predict_proba(X)[0][1])
     except (ValueError, TypeError, KeyError) as exc:
         return jsonify({"status": "error", "mensaje": str(exc)}), 400
+    except Exception:
+        # joblib.load / unpickling puede fallar por version de sklearn en
+        # el deploy: responder JSON (nunca HTML) con mensaje entendible.
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "mensaje": "El modelo predictivo no esta disponible ahora. "
+                       "Probá de nuevo en unos segundos.",
+        }), 503
 
     prob = round(100 * proba, 1)
     nivel = "Crítico" if prob >= 70 else ("Moderado" if prob >= 40 else "Bajo")
@@ -1485,12 +1517,34 @@ def api_stats():
     })
 
 
-def _contexto_ia():
+def _contexto_ia(contexto=None):
     s = _stats_globales()
     calles = ", ".join(f"{c} ({n})" for c, n in s["top_calles"][:3])
     puntos = " | ".join(
         f"{jur.title()}: {', '.join(pts)}"
         for jur, pts in PUNTOS_CRITICOS.items())
+    vista = ""
+    if isinstance(contexto, dict):
+        partes = []
+        jur = str(contexto.get("jurisdiccion") or "").strip()
+        modo = str(contexto.get("modo") or "").strip()
+        franja = str(contexto.get("franja") or "").strip()
+        dia = str(contexto.get("dia") or "").strip()
+        if jur and normalizar(jur) not in ("TODOS", "TODAS"):
+            partes.append(f"jurisdiccion: {jur}")
+        if modo and normalizar(modo) not in ("TODOS", "TODAS"):
+            partes.append(f"modo de transporte: {modo}")
+        if franja and normalizar(franja) not in ("00:00-24:00", "0-24"):
+            partes.append(f"franja horaria: {franja}")
+        if dia and normalizar(dia) not in ("TODOS", "TODAS"):
+            partes.append(f"dia: {dia}")
+        if partes:
+            vista = (
+                "\nLO QUE EL USUARIO ESTA VIENDO AHORA EN PANTALLA "
+                "(filtros activos del mapa): " + "; ".join(partes) + ". "
+                "Si dice 'aca', 'esta zona', 'esta calle', 'este horario' "
+                "o 'ahora', interpretalo con ese contexto sin pedirselo "
+                "de nuevo.")
     return (
         "Sos el Copiloto Vial Inteligente de los Valles de Jujuy (Perico, "
         "Monterrico, El Carmen), el asistente del Observatorio de "
@@ -1521,6 +1575,7 @@ def _contexto_ia():
         f"{s['edad_promedio']} anos; franja pico: {s['peor_franja'][0]} "
         f"({s['peor_franja'][1]} casos); arterias mas criticas: {calles}. "
         "No inventes estadisticas ni cifras que no esten en este contexto."
+        + vista
     )
 
 
@@ -1615,7 +1670,7 @@ def _stats_calle(nombre):
     }
 
 
-def _respuesta_reglas(mensaje):
+def _respuesta_reglas(mensaje, contexto=None):
     """Fallback offline: responde con estadisticas reales del dataset."""
     m = normalizar(mensaje)
     s = _stats_globales()
@@ -1631,6 +1686,18 @@ def _respuesta_reglas(mensaje):
                 f"({st['pct_grave']}% graves). Su franja más conflictiva es "
                 f"{st['franja_pico']}. Circulá con precaución extra en sus "
                 "intersecciones y reducí velocidad de noche.")
+
+    # Referencias vagas ('aca', 'esta zona', 'este lugar'): se resuelven
+    # con la jurisdiccion que el usuario tiene activa en los filtros.
+    if isinstance(contexto, dict) and re.search(
+            r"\b(ACA|AQUI|ESTA ZONA|ESTE LUGAR|ESTA CIUDAD)\b", m):
+        jur = normalizar(contexto.get("jurisdiccion"))
+        if jur in PUNTOS_CRITICOS:
+            pts = ", ".join(PUNTOS_CRITICOS[jur])
+            return (f"En {jur.title()} los puntos a vigilar son: {pts}. "
+                    "En el mapa ya tenés esa jurisdicción filtrada: las "
+                    "zonas rojas marcan los tramos con más siniestros "
+                    "históricos.")
 
     # Preguntas por jurisdiccion: citar puntos criticos reales (no alucinar)
     if "MONTERRICO" in m or "MONTERICO" in m:
@@ -1700,17 +1767,22 @@ def api_chat_gemini():
     if not mensaje:
         return jsonify({"status": "error", "mensaje": "mensaje vacío"}), 400
 
+    # Contexto de pantalla (jurisdiccion/modo/franja/dia que el usuario
+    # tiene activos en el mapa): la IA ya sabe de que se habla cuando el
+    # usuario dice 'aca', 'esta zona' o 'este horario'.
+    contexto = payload.get("contexto")
     if GEMINI_API_KEY:
         try:
             return jsonify({
                 "respuesta": _preguntar_gemini(
-                    mensaje, payload.get("historial")),
+                    mensaje, payload.get("historial"),
+                    sistema=_contexto_ia(contexto)),
                 "fuente": "gemini",
             })
         except RuntimeError:
             pass  # cae al modo reglas sin cortar la conversación
     return jsonify({
-        "respuesta": _respuesta_reglas(mensaje),
+        "respuesta": _respuesta_reglas(mensaje, contexto),
         "fuente": "reglas",
     })
 
@@ -2303,33 +2375,37 @@ def _stats_edad(edad):
 def _desafio_gemini(usados, nivel=1):
     """Genera un dilema tecnico nuevo con Gemini (modo infinito)."""
     sistema = (
-        "Sos un generador de dilemas de ingenieria vial y Ley Nacional de "
-        "Transito 24.449 para el Observatorio de Siniestralidad de los "
-        "Valles de Jujuy (Perico, Monterrico, El Carmen, San Salvador). "
-        "Respondé SOLO con un objeto JSON valido, sin markdown ni texto "
-        "extra, con las claves: titulo, lugar (un cruce o tramo real del "
-        "corredor jujeño), situacion (2-3 oraciones tecnicas), modo "
-        "(MOTO | AUTO | CAMIONETA | BICICLETA | PEATON | CAMION), opciones "
-        "(lista de EXACTAMENTE 2 objetos con claves texto, segura "
-        "(booleano), impacto ('+80%' o '-50%'), explicacion (la norma vial "
-        "o el dato tecnico que la fundamenta)). Exactamente UNA opcion "
-        "debe ser reglamentariamente correcta; la otra debe sonar "
-        "verosimil pero estar mal. Prioriza: prioridades de paso, "
-        "distancias de seguridad, fisica del frenado, zonas ciegas de "
-        "vehiculos pesados, manejo defensivo en mojado/niebla.")
+        "Sos un generador de dilemas viales CORTOS para estudiantes de "
+        "secundaria del Observatorio de Siniestralidad de los Valles de "
+        "Jujuy (Perico, Monterrico, El Carmen, San Salvador), segun la "
+        "Ley Nacional de Transito 24.449. Respondé SOLO con un objeto "
+        "JSON valido, sin markdown ni texto extra, con las claves: "
+        "titulo (maximo 6 palabras), lugar (un cruce o tramo real del "
+        "corredor jujeño), situacion (1-2 oraciones cortas, maximo 30 "
+        "palabras), modo (MOTO | AUTO | CAMIONETA | BICICLETA | PEATON | "
+        "CAMION), opciones (lista de EXACTAMENTE 2 objetos con claves "
+        "texto (maximo 15 palabras), segura (booleano), impacto ('+80%' "
+        "o '-50%'), explicacion (UNA oracion breve, maximo 25 palabras)). "
+        "Exactamente UNA opcion debe ser reglamentariamente correcta; la "
+        "otra debe sonar verosimil pero estar mal. Prioriza: prioridades "
+        "de paso, distancias de seguridad, fisica del frenado, zonas "
+        "ciegas de vehiculos pesados, manejo defensivo en mojado/niebla.")
     dificultad = {1: "intermedia", 2: "alta", 3: "muy alta"}.get(nivel, "alta")
     previas = "; ".join(str(u) for u in usados[-6:]) or "ninguna"
-    prompt = (f"Generá UN dilema de dificultad {dificultad} "
+    prompt = (f"Generá UN dilema CORTO de dificultad {dificultad} "
               f"(no repitas estos: {previas}).")
     try:
         texto = _preguntar_gemini(prompt, sistema=sistema,
-                                  max_tokens=900, temperatura=0.9)
+                                  max_tokens=450, temperatura=0.9)
         datos = json.loads(re.sub(r"^```(?:json)?|```$", "",
                                   texto.strip(), flags=re.M).strip())
         ops = datos.get("opciones")
         if (isinstance(ops, list) and len(ops) == 2
                 and sum(1 for o in ops if o.get("segura")) == 1
-                and datos.get("situacion")):
+                and datos.get("situacion")
+                and len(str(datos["situacion"])) <= _LIM_ESCENARIO
+                and all(len(str(o.get("texto") or "")) <= _LIM_OPCION
+                        for o in ops)):
             return datos
     except (RuntimeError, json.JSONDecodeError, AttributeError, TypeError):
         return None
@@ -2352,56 +2428,76 @@ def _stats_dilema(modo, edad, sit):
 
 
 _DILEMA_IA_SISTEMA = (
-    "Eres un evaluador de ingenieria de transito y peritaje vial segun la "
-    "Ley Nacional de Transito de Argentina (Ley 24.449). Genera un dilema "
-    "vial extremo y complejo para un conductor adulto experimentado. "
-    "REGLAS CRITICAS DE CALIDAD: 1. PROHIBIDAS las opciones absurdas o de "
-    "sentido comun evidente (nada de 'chocar vs frenar', 'mirar el "
-    "celular', 'pasar por el cordon'). 2. Ambas opciones (A y B) deben "
-    "parecer correctas, logicas y ser maniobras que conductores "
-    "experimentados realizan habitualmente. 3. Solo UNA opcion es "
-    "reglamentaria y tecnicamente valida segun la normativa o la fisica "
-    "del frenado. 4. Temas a cubrir aleatoriamente: prioridad de la "
-    "derecha en cruces con avenidas no semaforizadas (Art. 41); salida de "
-    "carril interior en rotondas multicarril; uso de balizas "
-    "reglamentarias en frenadas de emergencia en autopista/rutas vs "
-    "desaceleracion; operacion ABS en piso mojado (presion continua vs "
-    "bombeo de freno); adelantamiento a transporte pesado con semirremolque "
-    "y senas de giro (guino izquierdo indica peligro, guino derecho "
-    "habilita paso); pendientes estrechas y retroceso de vehiculos segun "
-    "porte y sentido de circulacion. 5. Devuelve UNICAMENTE un JSON con: "
-    "escenario, opcion_a, opcion_b, correcta ('A'|'B'), "
-    "fundamento_tecnico (explicacion del articulo o principio fisico).")
+    "Eres un generador de desafios viales CORTOS para estudiantes de "
+    "secundaria, segun la Ley Nacional de Transito de Argentina (Ley "
+    "24.449). REGLAS ESTRICTAS DE BREVEDAD: 1. 'escenario': UNA o DOS "
+    "oraciones cortas (maximo 30 palabras) que plantean una situacion "
+    "concreta y terminan con una pregunta directa. 2. 'opcion_a' y "
+    "'opcion_b': MAXIMO 15 palabras cada una; ambas parecen correctas "
+    "pero solo UNA es reglamentaria y tecnicamente valida. 3. "
+    "'fundamento_tecnico': UNA sola oracion breve (maximo 25 palabras) "
+    "que cita el articulo o el principio fisico. 4. PROHIBIDAS las "
+    "opciones absurdas o de sentido comun evidente (nada de 'chocar vs "
+    "frenar', 'mirar el celular', 'pasar por el cordon'). 5. Temas a "
+    "variar: prioridad de la derecha en cruces sin semaforo (Art. 41); "
+    "prioridad dentro de rotondas (Art. 43); distancia minima al "
+    "sobrepasar ciclistas (1,5 m); luces bajas con niebla; frenado en "
+    "piso mojado y aquaplaning; puntos ciegos al girar camiones; "
+    "pendientes angostas y retroceso. 6. Devuelve UNICAMENTE un JSON "
+    "con: escenario, opcion_a, opcion_b, correcta ('A'|'B'), "
+    "fundamento_tecnico.")
+
+
+# Limites de longitud para los dilemas de la IA: los chicos no leen
+# textos largos. Si Gemini se pasa, se rechaza y se reintenta/cae al
+# banco de reserva (que ya es breve).
+_LIM_ESCENARIO = 280
+_LIM_OPCION = 170
+_LIM_FUNDAMENTO = 280
+
+
+def _dilema_corto_ok(d):
+    """Valida el contrato del dilema IA y que sea corto (poco texto)."""
+    if not isinstance(d, dict):
+        return False
+    if not (d.get("escenario") and d.get("opcion_a") and d.get("opcion_b")):
+        return False
+    return (len(str(d["escenario"])) <= _LIM_ESCENARIO
+            and len(str(d["opcion_a"])) <= _LIM_OPCION
+            and len(str(d["opcion_b"])) <= _LIM_OPCION
+            and len(str(d.get("fundamento_tecnico") or "")) <= _LIM_FUNDAMENTO)
 
 
 def _dilema_ia(usados=()):
     """Genera un dilema tecnico con Gemini. None si falla.
 
-    Camino principal: SDK google-generativeai (gemini-1.5-flash,
-    temperature 0.9 para variedad total). Respaldo: REST directo.
+    Camino principal: SDK google-generativeai (primer modelo de
+    GEMINI_MODELOS, temperature 0.9 para variedad). Respaldo: REST
+    directo sobre la misma lista de modelos.
     """
     if not GEMINI_API_KEY:
         return None
     try:
         import google.generativeai as genai  # type: ignore
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel(GEMINI_MODELOS[0])
         prompt = (
-            "Genera un dilema técnico vial real y difícil según la Ley "
-            "Nacional 24.449 de Argentina. Las dos opciones deben parecer "
-            "correctas a un conductor común pero solo una se ajusta a la "
-            "normativa técnica. Responde ÚNICAMENTE un JSON con: "
+            "Genera UN dilema vial CORTO para estudiantes de secundaria "
+            "según la Ley Nacional 24.449 de Argentina: escenario de 1-2 "
+            "oraciones con una pregunta directa, dos opciones de máximo "
+            "15 palabras (ambas plausibles, solo una reglamentaria) y un "
+            "fundamento de una sola oración. Responde ÚNICAMENTE un JSON "
+            "con: "
             '{"escenario": "...", "opcion_a": "...", "opcion_b": "...", '
             '"correcta": "A", "fundamento_tecnico": "..."}')
         response = model.generate_content(
             prompt,
             generation_config={"temperature": 0.9,
-                               "max_output_tokens": 700})
+                               "max_output_tokens": 400})
         clean_text = (response.text.replace("```json", "")
                       .replace("```", "").strip())
         d = json.loads(clean_text)
-        if (isinstance(d, dict) and d.get("escenario")
-                and d.get("opcion_a") and d.get("opcion_b")):
+        if _dilema_corto_ok(d):
             return d
     except Exception:
         import traceback
@@ -2416,9 +2512,9 @@ def _dilema_ia(usados=()):
                     "system_instruction": {
                         "parts": [{"text": _DILEMA_IA_SISTEMA}]},
                     "contents": [{"role": "user", "parts": [{"text":
-                        "Genera el dilema vial tecnico en JSON."}]}],
+                        "Genera el dilema vial corto en JSON."}]}],
                     "generationConfig": {
-                        "maxOutputTokens": 700, "temperature": 0.85,
+                        "maxOutputTokens": 400, "temperature": 0.85,
                         "thinkingConfig": {"thinkingBudget": 0}},
                 },
                 timeout=25)
@@ -2436,22 +2532,21 @@ def _dilema_ia(usados=()):
             limpio = re.sub(r"^```\s*", "", texto_raw,
                             flags=re.MULTILINE).strip()
             d = json.loads(limpio)
-            if (isinstance(d, dict) and d.get("escenario")
-                    and d.get("opcion_a") and d.get("opcion_b")):
+            if _dilema_corto_ok(d):
                 return d
         except Exception:
             continue
     return None
 
 
-def _dilema_a_tarjeta(raw):
+def _dilema_a_tarjeta(raw, modo="AUTO", edad=None):
     """Normaliza el JSON de Gemini al shape del juego."""
     correcta_a = str(raw.get("correcta", "")).strip().upper() == "A"
     fund = str(raw.get("fundamento_tecnico", "")).strip()
-    return {
+    tarjeta = {
         "id": f"IA-{random.randint(1000, 99999)}",
-        "titulo": "Dilema técnico generado por IA",
-        "lugar": "Peritaje vial · Ley 24.449",
+        "titulo": "Dilema vial · Desafío IA",
+        "lugar": "Seguridad vial · Ley 24.449",
         # Claves crudas del contrato IA + shape del juego.
         "escenario": str(raw.get("escenario", "")).strip(),
         "opcion_a": str(raw.get("opcion_a", "")).strip(),
@@ -2461,14 +2556,20 @@ def _dilema_a_tarjeta(raw):
         "dificultad": 3,
         "opciones": [
             {"texto": str(raw.get("opcion_a", "")).strip(),
+             "segura": correcta_a,
              "correcta": correcta_a, "es_correcta": correcta_a,
              "explicacion": fund, "comentario": fund},
             {"texto": str(raw.get("opcion_b", "")).strip(),
+             "segura": not correcta_a,
              "correcta": not correcta_a, "es_correcta": not correcta_a,
              "explicacion": fund, "comentario": fund},
         ],
-        "explicacion": fund, "stats": {}, "fuente": "ia",
+        "explicacion": fund, "fuente": "ia",
     }
+    # Stats reales del dataset para el feedback (sin esto el juego
+    # mostraba 'undefined' debajo de cada dilema IA).
+    tarjeta["stats"] = _stats_dilema(modo, edad, tarjeta)
+    return tarjeta
 
 
 # Banco de reserva TECNICO (Ley 24.449): solo se usa si Gemini esta
@@ -2532,16 +2633,23 @@ def api_generar_dilema_ia():
     """
     payload = request.get_json(silent=True) or {}
     usados = {str(u) for u in (payload.get("usados") or [])}
+    modo = normalizar(payload.get("modo"))
+    if modo not in MODOS_VALIDOS:
+        modo = "AUTO"
+    try:
+        edad = min(max(int(payload.get("edad")), 10), 95)
+    except (TypeError, ValueError):
+        edad = None
     try:
         raw = _dilema_ia(usados) or _dilema_ia(usados)  # reintento
     except Exception:
         raw = None
     if raw:
-        d = _dilema_a_tarjeta(raw)
+        d = _dilema_a_tarjeta(raw, modo, edad)
     else:
         banco = [r for r in _DILEMAS_RESERVA
                  if r["escenario"][:40] not in usados] or _DILEMAS_RESERVA
-        d = _dilema_a_tarjeta(random.choice(banco))
+        d = _dilema_a_tarjeta(random.choice(banco), modo, edad)
         d["fuente"] = "reserva"
     return jsonify({"status": "ok", "dilema": d})
 
